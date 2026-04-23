@@ -1,5 +1,15 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
 
-    <style name="Theme.MethReceiver" parent="android:Theme.Material.Light.NoActionBar" />
+    <style name="Theme.MethReceiver" parent="Theme.MaterialComponents.DayNight.NoActionBar">
+        <item name="android:statusBarColor">@android:color/transparent</item>
+        <item name="android:navigationBarColor">@android:color/black</item>
+    </style>
+
+    <style name="Theme.MethReceiver.Starting" parent="Theme.SplashScreen">
+        <item name="windowSplashScreenBackground">#050B18</item>
+        <item name="windowSplashScreenAnimatedIcon">@drawable/usu</item>
+        <item name="postSplashScreenTheme">@style/Theme.MethReceiver</item>
+    </style>
+
 </resources>
