@@ -32,6 +32,7 @@ import androidx.compose.foundation.lazy.grid.LazyVerticalGrid
 import androidx.compose.foundation.lazy.grid.items
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.clickable
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.outlined.LocationOn
 import androidx.compose.material.icons.outlined.NetworkCheck
@@ -85,6 +86,8 @@ import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.graphics.Path
+import androidx.compose.ui.graphics.nativeCanvas
 import android.content.Context
 import android.content.Intent
 import android.content.IntentFilter
@@ -127,6 +130,18 @@ class MainActivity : ComponentActivity() {
     }
 }
 
+data class MethaneSample(
+    val timeMillis: Long,
+    val ppm: Double
+)
+
+enum class TrendWindow(val label: String, val durationMillis: Long) {
+    ONE_MIN("1M", 60_000L),
+    FIVE_MIN("5M", 5 * 60_000L),
+    FIFTEEN_MIN("15M", 15 * 60_000L),
+    ONE_HOUR("1H", 60 * 60_000L)
+}
+
 data class TelemetryPacket(
     val timestamp: String = "",
     val methanePpm: Double? = null,
@@ -167,7 +182,8 @@ fun ReceiverDashboardApp() {
     var latestPacket by remember { mutableStateOf(TelemetryPacket()) }
     var autoReconnect by remember { mutableStateOf(true) }
     var isConnecting by remember { mutableStateOf(false) }
-    val methaneHistory = remember { mutableStateListOf<Double>() }
+    val methaneHistory = remember { mutableStateListOf<MethaneSample>() }
+    var selectedTrendWindow by remember { mutableStateOf(TrendWindow.ONE_MIN) }
     val rssiHistory = remember { mutableStateListOf<Int>() }
     val packetArrivalTimes = remember { mutableStateListOf<Long>() }
     val scope = rememberCoroutineScope()
@@ -209,8 +225,11 @@ fun ReceiverDashboardApp() {
                 )
 
                 packet.methanePpm?.let {
-                    methaneHistory.add(it)
-                    if (methaneHistory.size > 24) methaneHistory.removeAt(0)
+                    val now = System.currentTimeMillis()
+                    methaneHistory.add(MethaneSample(now, it))
+
+                    val cutoff = now - TrendWindow.ONE_HOUR.durationMillis
+                    methaneHistory.removeAll { sample -> sample.timeMillis < cutoff }
                 }
 
                 packet.radioRssi?.let {
@@ -266,7 +285,11 @@ fun ReceiverDashboardApp() {
                     .weight(1.35f)
                     .fillMaxHeight()
             ) {
-                MethaneTrendPanel(values = methaneHistory.toList())
+                MethaneTrendPanel(
+                    samples = methaneHistory.toList(),
+                    selectedWindow = selectedTrendWindow,
+                    onWindowSelected = { selectedTrendWindow = it }
+                )
             }
 
             Box(
@@ -326,6 +349,8 @@ fun HeaderRow(
     onAutoReconnectChanged: (Boolean) -> Unit,
     onReconnectClicked: () -> Unit
 ) {
+    val localTime = rememberLocalTime()
+
     DashboardPanel(
         modifier = Modifier.fillMaxWidth(),
         containerColor = HeaderBg,
@@ -350,8 +375,14 @@ fun HeaderRow(
 
             Row(verticalAlignment = Alignment.CenterVertically) {
                 Column(horizontalAlignment = Alignment.End) {
-                    Text("Last Packet", color = TextSoft, style = MaterialTheme.typography.bodyMedium)
-                    Text(state.lastMessageAt, color = Color.White, style = MaterialTheme.typography.headlineSmall, fontWeight = FontWeight.Bold, modifier = Modifier.padding(start = 10.dp))
+                    Text("Local Time", color = TextSoft, style = MaterialTheme.typography.bodyMedium)
+                    Text(
+                        localTime,
+                        color = Color.White,
+                        style = MaterialTheme.typography.headlineSmall,
+                        fontWeight = FontWeight.Bold,
+                        modifier = Modifier.padding(start = 10.dp)
+                    )
                 }
                 Spacer(modifier = Modifier.width(16.dp))
                 if (isConnecting) {
@@ -543,74 +574,241 @@ fun PanelTitle(
     }
 }
 
-
 @Composable
-fun MethaneTrendPanel(values: List<Double>) {
+fun MethaneTrendPanel(
+    samples: List<MethaneSample>,
+    selectedWindow: TrendWindow,
+    onWindowSelected: (TrendWindow) -> Unit
+) {
+    val now = System.currentTimeMillis()
+    val visibleSamples = samples.filter {
+        it.timeMillis >= now - selectedWindow.durationMillis
+    }
+
     DashboardPanel(modifier = Modifier.fillMaxSize()) {
         Column(modifier = Modifier.fillMaxSize()) {
-            Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically
+            ) {
                 PanelTitle("METHANE TREND (ppm)", Icons.Outlined.ShowChart)
+
                 Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                    TinyTimeChip("1M", active = true)
-                    TinyTimeChip("5M")
-                    TinyTimeChip("15M")
-                    TinyTimeChip("1H")
+                    TrendWindow.values().forEach { window ->
+                        TinyTimeChip(
+                            text = window.label,
+                            active = selectedWindow == window,
+                            onClick = { onWindowSelected(window) }
+                        )
+                    }
                 }
             }
-            Spacer(modifier = Modifier.height(12.dp))
-            LineChart(values = values.ifEmpty { listOf(3.0, 3.2, 3.1, 3.4, 3.3, 3.5, 3.2, 3.1) })
+
+            Spacer(modifier = Modifier.height(10.dp))
+
+            MethaneLineChart(
+                samples = visibleSamples,
+                window = selectedWindow
+            )
         }
     }
 }
 
 @Composable
-fun TinyTimeChip(text: String, active: Boolean = false) {
+fun TinyTimeChip(
+    text: String,
+    active: Boolean = false,
+    onClick: () -> Unit = {}
+) {
     Box(
         modifier = Modifier
-            .clip(RoundedCornerShape(10.dp))
+            .clip(RoundedCornerShape(12.dp))
             .background(if (active) Color(0xFF143A25) else Color(0xFF111F39))
-            .border(1.dp, if (active) Color(0xFF295A39) else PanelBorder, RoundedCornerShape(10.dp))
-            .padding(horizontal = 10.dp, vertical = 6.dp)
+            .border(
+                1.dp,
+                if (active) Green.copy(alpha = 0.8f) else PanelBorder,
+                RoundedCornerShape(12.dp)
+            )
+            .padding(horizontal = 12.dp, vertical = 7.dp)
+            .clickable { onClick() }
     ) {
-        Text(text, color = if (active) Green else TextSoft)
+        Text(
+            text,
+            color = if (active) Green else TextSoft,
+            fontWeight = if (active) FontWeight.Bold else FontWeight.Normal
+        )
     }
 }
 
 @Composable
-fun LineChart(values: List<Double>) {
+fun MethaneLineChart(
+    samples: List<MethaneSample>,
+    window: TrendWindow
+) {
     Canvas(modifier = Modifier.fillMaxSize()) {
         val width = size.width
         val height = size.height
-        val padding = 28f
-        val chartWidth = width - padding * 2
-        val chartHeight = height - padding * 2
-        val maxValue = (values.maxOrNull() ?: 1.0).coerceAtLeast(1.0)
-        val minValue = (values.minOrNull() ?: 0.0).coerceAtMost(maxValue - 0.1)
-        val valueRange = (maxValue - minValue).coerceAtLeast(0.5)
 
+        val leftPad = 46f
+        val rightPad = 18f
+        val topPad = 10f
+        val bottomPad = 26f
+
+        val chartWidth = width - leftPad - rightPad
+        val chartHeight = height - topPad - bottomPad
+
+        val displaySamples = if (samples.isEmpty()) {
+            val now = System.currentTimeMillis()
+            listOf(
+                MethaneSample(now - 50_000, 3.0),
+                MethaneSample(now - 40_000, 3.2),
+                MethaneSample(now - 30_000, 3.1),
+                MethaneSample(now - 20_000, 3.4),
+                MethaneSample(now - 10_000, 3.3),
+                MethaneSample(now, 3.5)
+            )
+        } else {
+            samples
+        }
+
+        val now = System.currentTimeMillis()
+        val startTime = now - window.durationMillis
+
+        val visiblePpm = displaySamples.map { it.ppm }
+        val rawMin = visiblePpm.minOrNull() ?: 0.0
+        val rawMax = visiblePpm.maxOrNull() ?: 10.0
+
+        val padding = ((rawMax - rawMin) * 0.15).coerceAtLeast(0.25)
+        var minValue = (rawMin - padding).coerceAtLeast(0.0)
+        var maxValue = rawMax + padding
+
+        if (maxValue - minValue < 1.0) {
+            val center = (maxValue + minValue) / 2.0
+            minValue = (center - 0.5).coerceAtLeast(0.0)
+            maxValue = center + 0.5
+        }
+
+        val valueRange = maxValue - minValue
+
+        val axisPaint = android.graphics.Paint().apply {
+            color = android.graphics.Color.rgb(169, 184, 208)
+            textSize = 16f
+            isAntiAlias = true
+            textAlign = android.graphics.Paint.Align.RIGHT
+        }
+
+        val xPaint = android.graphics.Paint().apply {
+            color = android.graphics.Color.rgb(169, 184, 208)
+            textSize = 16f
+            isAntiAlias = true
+            textAlign = android.graphics.Paint.Align.CENTER
+        }
+
+        // Horizontal grid + dynamic Y-axis labels
         for (i in 0..4) {
-            val y = padding + chartHeight * i / 4f
-            drawLine(color = Color(0xFF1B2A47), start = Offset(padding, y), end = Offset(width - padding, y), strokeWidth = 1f)
+            val y = topPad + chartHeight * i / 4f
+            drawLine(
+                color = Color(0xFF1B2A47),
+                start = Offset(leftPad, y),
+                end = Offset(width - rightPad, y),
+                strokeWidth = 1f
+            )
+
+            val labelValue = maxValue - (valueRange * i / 4.0)
+            drawContext.canvas.nativeCanvas.drawText(
+                String.format(Locale.US, "%.1f", labelValue),
+                leftPad - 8f,
+                y + 5f,
+                axisPaint
+            )
         }
+
+        // Vertical grid + 24-hour X-axis labels
+        val timeFormatter = SimpleDateFormat("HH:mm", Locale.US)
+
         for (i in 0..5) {
-            val x = padding + chartWidth * i / 5f
-            drawLine(color = Color(0xFF14233E), start = Offset(x, padding), end = Offset(x, height - padding), strokeWidth = 1f)
+            val x = leftPad + chartWidth * i / 5f
+            drawLine(
+                color = Color(0xFF14233E),
+                start = Offset(x, topPad),
+                end = Offset(x, height - bottomPad),
+                strokeWidth = 1f
+            )
+
+            val labelTime = startTime + (window.durationMillis * i / 5)
+            drawContext.canvas.nativeCanvas.drawText(
+                timeFormatter.format(Date(labelTime)),
+                x,
+                height - 6f,
+                xPaint
+            )
         }
 
-        val points = values.mapIndexed { index, value ->
-            val x = padding + (chartWidth * index / (values.lastIndex.coerceAtLeast(1))).toFloat()
-            val ratio = ((value - minValue) / valueRange).toFloat()
-            val y = height - padding - ratio * chartHeight
-            Offset(x, y)
+        val points = displaySamples.map { sample ->
+            val xRatio = ((sample.timeMillis - startTime).toDouble() / window.durationMillis)
+                .coerceIn(0.0, 1.0)
+                .toFloat()
+
+            val yRatio = ((sample.ppm - minValue) / valueRange)
+                .coerceIn(0.0, 1.0)
+                .toFloat()
+
+            Offset(
+                x = leftPad + xRatio * chartWidth,
+                y = height - bottomPad - yRatio * chartHeight
+            )
         }
 
-        for (i in 0 until points.lastIndex) {
-            drawLine(color = Green, start = points[i], end = points[i + 1], strokeWidth = 4f, cap = StrokeCap.Round)
+        if (points.size >= 2) {
+            val path = androidx.compose.ui.graphics.Path().apply {
+                moveTo(points.first().x, height - bottomPad)
+                points.forEach { lineTo(it.x, it.y) }
+                lineTo(points.last().x, height - bottomPad)
+                close()
+            }
+
+            drawPath(
+                path = path,
+                brush = Brush.verticalGradient(
+                    colors = listOf(
+                        Green.copy(alpha = 0.35f),
+                        Green.copy(alpha = 0.04f)
+                    ),
+                    startY = topPad,
+                    endY = height - bottomPad
+                )
+            )
+
+            for (i in 0 until points.lastIndex) {
+                drawLine(
+                    color = Green,
+                    start = points[i],
+                    end = points[i + 1],
+                    strokeWidth = 1.5f,
+                    cap = StrokeCap.Round
+                )
+            }
+
+            points.forEach { point ->
+                drawCircle(color = Green, radius = 2.5f, center = point)
+                drawCircle(color = PanelBg, radius = 1.5f, center = point)
+            }
         }
-        points.forEach { point ->
-            drawCircle(color = Green, radius = 5f, center = point)
-            drawCircle(color = PanelBg, radius = 2.4f, center = point)
-        }
+
+        // Axis lines
+        drawLine(
+            color = Color(0xFF2A3A58),
+            start = Offset(leftPad, topPad),
+            end = Offset(leftPad, height - bottomPad),
+            strokeWidth = 2f
+        )
+        drawLine(
+            color = Color(0xFF2A3A58),
+            start = Offset(leftPad, height - bottomPad),
+            end = Offset(width - rightPad, height - bottomPad),
+            strokeWidth = 2f
+        )
     }
 }
 
@@ -698,6 +896,12 @@ fun SystemStatusPanel(packet: TelemetryPacket, state: ConnectionState) {
                 "Connection",
                 if (state.connected) "Connected" else state.status,
                 if (state.connected) Green else Orange
+            )
+
+            StatusRowItem(
+                "Last Packet",
+                state.lastMessageAt,
+                Color.White
             )
 
             StatusRowItem(
@@ -1126,4 +1330,18 @@ fun getTabletBatteryPercent(context: Context): Int? {
     val scale = intent.getIntExtra(BatteryManager.EXTRA_SCALE, -1)
     if (level < 0 || scale <= 0) return null
     return (level * 100) / scale
+}
+
+@Composable
+fun rememberLocalTime(): String {
+    var currentTime by remember { mutableStateOf(nowString()) }
+
+    LaunchedEffect(Unit) {
+        while (true) {
+            currentTime = nowString()
+            delay(1000)
+        }
+    }
+
+    return currentTime
 }

@@ -18,11 +18,13 @@ local.properties
 .gradle/
 build/
 */build/
+app/release/
 
 # Local config
 local.properties
 .idea/
 *.iml
+*jks
 
 # Android/IntelliJ
 captures/
