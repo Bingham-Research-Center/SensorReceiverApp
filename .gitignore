@@ -1,0 +1,40 @@
+*.iml
+.gradle
+/local.properties
+/.idea/caches
+/.idea/libraries
+/.idea/modules.xml
+/.idea/workspace.xml
+/.idea/navEditor.xml
+/.idea/assetWizardSettings.xml
+.DS_Store
+/build
+/captures
+.externalNativeBuild
+.cxx
+local.properties
+
+# Gradle
+.gradle/
+build/
+*/build/
+
+# Local config
+local.properties
+.idea/
+*.iml
+
+# Android/IntelliJ
+captures/
+.navigation/
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Python venv if present in project
+.venv/
+venv/
+
+# Logs
+*.log
