@@ -8,7 +8,7 @@
 
     <style name="Theme.MethReceiver.Starting" parent="Theme.SplashScreen">
         <item name="windowSplashScreenBackground">#050B18</item>
-        <item name="windowSplashScreenAnimatedIcon">@drawable/usu</item>
+        <item name="windowSplashScreenAnimatedIcon">@drawable/usu_splash</item>
         <item name="postSplashScreenTheme">@style/Theme.MethReceiver</item>
     </style>
 

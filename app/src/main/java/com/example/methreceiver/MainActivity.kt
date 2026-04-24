@@ -27,9 +27,6 @@ import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
-import androidx.compose.foundation.lazy.grid.GridCells
-import androidx.compose.foundation.lazy.grid.LazyVerticalGrid
-import androidx.compose.foundation.lazy.grid.items
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.clickable
@@ -41,13 +38,11 @@ import androidx.compose.material.icons.outlined.Sensors
 import androidx.compose.material.icons.outlined.WarningAmber
 import androidx.compose.material.icons.outlined.Air
 import androidx.compose.material.icons.outlined.Explore
-import androidx.compose.material.icons.outlined.LocationOn
 import androidx.compose.material.icons.outlined.Podcasts
 import androidx.compose.material.icons.outlined.ShowChart
 import androidx.compose.material.icons.outlined.Settings
 import androidx.compose.material.icons.outlined.WaterDrop
 import androidx.compose.material.icons.outlined.Thermostat
-import androidx.compose.material.icons.outlined.Cloud
 import androidx.compose.material3.Icon
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
@@ -55,14 +50,10 @@ import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.ExperimentalMaterial3Api
-import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
-import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
-import androidx.compose.material3.TopAppBar
-import androidx.compose.material3.TopAppBarDefaults
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
@@ -86,7 +77,6 @@ import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
-import androidx.compose.ui.graphics.Path
 import androidx.compose.ui.graphics.nativeCanvas
 import android.content.Context
 import android.content.Intent
@@ -285,6 +275,15 @@ fun ReceiverDashboardApp() {
             }
         )
 
+        ConnectionIssueBanner(
+            state = connectionState,
+            onReconnectClicked = {
+                scope.launch(Dispatchers.IO) {
+                    socketManager.connect(DEFAULT_WS_URL)
+                }
+            }
+        )
+
         MetricGrid(packet = latestPacket)
 
         Row(
@@ -381,7 +380,7 @@ fun HeaderRow(
                 Spacer(modifier = Modifier.width(10.dp))
                 StatusBadge("Pi Server", if (state.connected) "Reachable" else "Offline", Icons.Outlined.NetworkCheck)
                 Spacer(modifier = Modifier.width(10.dp))
-                StatusBadge("WebSocket", if (state.connected) "Streaming" else state.status, Icons.Outlined.Sensors)
+                StatusBadge("WebSocket",if (state.connected) "Streaming" else shortConnectionStatus(state.status), Icons.Outlined.Sensors)
                 Spacer(modifier = Modifier.width(10.dp))
                 StatusBadge("GPS", gpsStatusText(state.connected), Icons.Outlined.LocationOn)
             }
@@ -423,6 +422,64 @@ fun HeaderRow(
 }
 
 @Composable
+fun ConnectionIssueBanner(
+    state: ConnectionState,
+    onReconnectClicked: () -> Unit
+) {
+    if (state.connected) return
+
+    DashboardPanel(
+        modifier = Modifier.fillMaxWidth(),
+        containerColor = Color(0xFF231626),
+        contentPadding = 12.dp
+    ) {
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.SpaceBetween
+        ) {
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Box(
+                    modifier = Modifier
+                        .size(42.dp)
+                        .clip(CircleShape)
+                        .border(2.dp, Orange, CircleShape),
+                    contentAlignment = Alignment.Center
+                ) {
+                    Text("!", color = Orange, fontWeight = FontWeight.Bold)
+                }
+
+                Spacer(modifier = Modifier.width(12.dp))
+
+                Column {
+                    Text(
+                        "Receiver connection lost",
+                        color = Orange,
+                        style = MaterialTheme.typography.titleMedium,
+                        fontWeight = FontWeight.Bold
+                    )
+                    Text(
+                        "Check tablet Wi-Fi is connected to receiver Pi hotspot!",
+                        color = TextSoft,
+                        style = MaterialTheme.typography.bodySmall
+                    )
+                }
+            }
+
+            Button(
+                onClick = onReconnectClicked,
+                shape = RoundedCornerShape(12.dp),
+                contentPadding = PaddingValues(horizontal = 12.dp, vertical = 6.dp),
+                colors = ButtonDefaults.buttonColors(containerColor = Orange),
+                modifier = Modifier.height(34.dp)
+            ) {
+                Text("Reconnect")
+            }
+        }
+    }
+}
+
+@Composable
 fun LogoTitleBlock(@DrawableRes logoRes: Int) {
     Row(verticalAlignment = Alignment.CenterVertically) {
         androidx.compose.foundation.Image(
@@ -433,9 +490,8 @@ fun LogoTitleBlock(@DrawableRes logoRes: Int) {
         )
         Spacer(modifier = Modifier.width(12.dp))
         Column {
-            Text("Utah State University", color = Color.White, style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Bold)
-            Text("Meth Receiver Dashboard", color = Color.White, style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.SemiBold)
-            Text("Methane Remote Sensing Project", color = TextSoft, style = MaterialTheme.typography.bodyMedium)
+            Text("Sensor Receiver Dashboard", color = Color.White, style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.SemiBold)
+            Text("Bingham Research Center", color = TextSoft, style = MaterialTheme.typography.bodyMedium)
         }
     }
 }
@@ -1850,3 +1906,13 @@ fun CompassCornerLabel(
     }
 }
 fun cToF(celsius: Double): Double = (celsius * 9.0 / 5.0) + 32.0
+
+fun shortConnectionStatus(status: String): String {
+    return when {
+        status.contains("failed", ignoreCase = true) -> "No Link"
+        status.contains("timeout", ignoreCase = true) -> "Timeout"
+        status.contains("Connection refused", ignoreCase = true) -> "Refused"
+        status.contains("Connecting", ignoreCase = true) -> "Connecting"
+        else -> status.take(18)
+    }
+}
