@@ -147,6 +147,16 @@ data class TelemetryPacket(
     val methanePpm: Double? = null,
     val windSpeedMps: Double? = null,
     val windDirectionDeg: Double? = null,
+    val windSpeed2dMps: Double? = null,
+    val windUMps: Double? = null,
+    val windVMps: Double? = null,
+    val windWMps: Double? = null,
+    val temperatureC: Double? = null,
+    val humidityPercent: Double? = null,
+    val pressureHpa: Double? = null,
+    val pitchDeg: Double? = null,
+    val rollDeg: Double? = null,
+    val magneticHeadingDeg: Double? = null,
     val gpsLat: Double? = null,
     val gpsLon: Double? = null,
     val radioRssi: Int? = null,
@@ -453,28 +463,220 @@ fun StatusBadge(label: String, value: String, icon: androidx.compose.ui.graphics
 
 @Composable
 fun MetricGrid(packet: TelemetryPacket) {
-    val metrics = listOf(
-        MetricUi("METHANE", packet.methanePpm?.let { format2(it) } ?: "--", "ppm", methaneAlert(packet.methanePpm), Green, Icons.Outlined.WarningAmber),
-        MetricUi("WIND SPEED", packet.windSpeedMps?.let { format1(it) } ?: "--", "m/s", windDescriptor(packet.windSpeedMps), Cyan, Icons.Outlined.Air),
-        MetricUi("WIND DIRECTION", packet.windDirectionDeg?.let { "${it.roundToInt()}°" } ?: "--", "", compassLabel(packet.windDirectionDeg), Purple, Icons.Outlined.Explore),
-        MetricUi("TEMPERATURE", "--", "°C", "Unavailable", Orange, Icons.Outlined.Thermostat),
-        MetricUi("HUMIDITY", "--", "%", "Unavailable", Blue, Icons.Outlined.WaterDrop),
-        MetricUi("GPS LATITUDE", packet.gpsLat?.let { format6(it) } ?: "--", "", "Receiver", Blue, Icons.Outlined.LocationOn),
-        MetricUi("GPS LONGITUDE", packet.gpsLon?.let { format6(it) } ?: "--", "", "Receiver", Blue, Icons.Outlined.LocationOn),
-        MetricUi("RSSI", packet.radioRssi?.toString() ?: "--", "dBm", signalQuality(packet.radioRssi), Yellow, Icons.Outlined.Podcasts)
-    )
-
-    LazyVerticalGrid(
-        columns = GridCells.Fixed(4),
-        horizontalArrangement = Arrangement.spacedBy(10.dp),
-        verticalArrangement = Arrangement.spacedBy(10.dp),
+    Row(
         modifier = Modifier
             .fillMaxWidth()
-            .height(250.dp),
-        userScrollEnabled = false
+            .height(130.dp),
+        horizontalArrangement = Arrangement.spacedBy(10.dp)
     ) {
-        items(metrics) { metric ->
-            MetricCard(metric)
+        DualMetricCard(
+            modifier = Modifier.weight(1f),
+            title = "AIR DATA",
+            leftLabel = "METHANE",
+            leftValue = packet.methanePpm?.let { format2(it) } ?: "--",
+            leftUnit = "ppm",
+            leftIcon = Icons.Outlined.WarningAmber,
+            leftColor = Green,
+            rightLabel = "WIND SPEED",
+            rightValue = packet.windSpeedMps?.let { format1(it) } ?: "--",
+            rightUnit = "m/s",
+            rightIcon = Icons.Outlined.Air,
+            rightColor = Cyan
+        )
+
+        DualMetricCard(
+            modifier = Modifier.weight(1f),
+            title = "ENVIRONMENT",
+            leftLabel = "TEMP",
+            leftValue = packet.temperatureC?.let { format1(cToF(it)) } ?: "--",
+            leftUnit = "°F",
+            leftIcon = Icons.Outlined.Thermostat,
+            leftColor = Orange,
+            rightLabel = "HUMIDITY",
+            rightValue = packet.humidityPercent?.let { format1(it) } ?: "--",
+            rightUnit = "%",
+            rightIcon = Icons.Outlined.WaterDrop,
+            rightColor = Blue
+        )
+
+        DualMetricCard(
+            modifier = Modifier.weight(1f),
+            title = "GPS",
+            leftLabel = "LAT",
+            leftValue = packet.gpsLat?.let { format6(it) } ?: "--",
+            leftUnit = "",
+            leftIcon = Icons.Outlined.LocationOn,
+            leftColor = Blue,
+            rightLabel = "LON",
+            rightValue = packet.gpsLon?.let { format6(it) } ?: "--",
+            rightUnit = "",
+            rightIcon = Icons.Outlined.LocationOn,
+            rightColor = Blue
+        )
+
+        SingleMetricCard(
+            modifier = Modifier.weight(1f),
+            title = "RADIO",
+            label = "RSSI",
+            value = packet.radioRssi?.toString() ?: "--",
+            unit = "dBm",
+            subtitle = signalQuality(packet.radioRssi),
+            icon = Icons.Outlined.Podcasts,
+            color = Yellow
+        )
+    }
+}
+
+@Composable
+fun DualMetricCard(
+    modifier: Modifier = Modifier,
+    title: String,
+    leftLabel: String,
+    leftValue: String,
+    leftUnit: String,
+    leftIcon: androidx.compose.ui.graphics.vector.ImageVector,
+    leftColor: Color,
+    rightLabel: String,
+    rightValue: String,
+    rightUnit: String,
+    rightIcon: androidx.compose.ui.graphics.vector.ImageVector,
+    rightColor: Color
+) {
+    DashboardPanel(modifier = modifier) {
+        Column(
+            modifier = Modifier.fillMaxSize(),
+            verticalArrangement = Arrangement.SpaceBetween
+        ) {
+            Text(
+                title,
+                color = TextSoft,
+                style = MaterialTheme.typography.bodySmall,
+                fontWeight = FontWeight.Bold
+            )
+
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.spacedBy(12.dp)
+            ) {
+                CompactMetricItem(
+                    modifier = Modifier.weight(1f),
+                    label = leftLabel,
+                    value = leftValue,
+                    unit = leftUnit,
+                    icon = leftIcon,
+                    color = leftColor
+                )
+
+                Box(
+                    modifier = Modifier
+                        .width(1.dp)
+                        .height(62.dp)
+                        .background(PanelBorder)
+                )
+
+                CompactMetricItem(
+                    modifier = Modifier.weight(1f),
+                    label = rightLabel,
+                    value = rightValue,
+                    unit = rightUnit,
+                    icon = rightIcon,
+                    color = rightColor
+                )
+            }
+        }
+    }
+}
+
+@Composable
+fun SingleMetricCard(
+    modifier: Modifier = Modifier,
+    title: String,
+    label: String,
+    value: String,
+    unit: String,
+    subtitle: String,
+    icon: androidx.compose.ui.graphics.vector.ImageVector,
+    color: Color
+) {
+    DashboardPanel(modifier = modifier) {
+        Column(
+            modifier = Modifier.fillMaxSize(),
+            verticalArrangement = Arrangement.SpaceBetween
+        ) {
+            Text(
+                title,
+                color = TextSoft,
+                style = MaterialTheme.typography.bodySmall,
+                fontWeight = FontWeight.Bold
+            )
+
+            CompactMetricItem(
+                modifier = Modifier.fillMaxWidth(),
+                label = label,
+                value = value,
+                unit = unit,
+                icon = icon,
+                color = color
+            )
+
+            Text(
+                subtitle,
+                color = color,
+                style = MaterialTheme.typography.bodySmall,
+                fontWeight = FontWeight.SemiBold
+            )
+        }
+    }
+}
+
+@Composable
+fun CompactMetricItem(
+    modifier: Modifier = Modifier,
+    label: String,
+    value: String,
+    unit: String,
+    icon: androidx.compose.ui.graphics.vector.ImageVector,
+    color: Color
+) {
+    Column(
+        modifier = modifier,
+        verticalArrangement = Arrangement.spacedBy(4.dp)
+    ) {
+        Row(
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(5.dp)
+        ) {
+            Icon(
+                imageVector = icon,
+                contentDescription = null,
+                tint = color,
+                modifier = Modifier.size(16.dp)
+            )
+            Text(
+                label,
+                color = TextSoft,
+                style = MaterialTheme.typography.bodySmall,
+                fontWeight = FontWeight.SemiBold
+            )
+        }
+
+        Row(verticalAlignment = Alignment.Bottom) {
+            Text(
+                value,
+                color = color,
+                style = MaterialTheme.typography.titleLarge,
+                fontWeight = FontWeight.Bold
+            )
+
+            if (unit.isNotEmpty()) {
+                Spacer(modifier = Modifier.width(4.dp))
+                Text(
+                    unit,
+                    color = Color.White,
+                    style = MaterialTheme.typography.bodySmall,
+                    modifier = Modifier.padding(bottom = 3.dp)
+                )
+            }
         }
     }
 }
@@ -820,68 +1022,196 @@ fun WindDirectionPanel(packet: TelemetryPacket) {
     DashboardPanel(modifier = Modifier.fillMaxSize()) {
         Column(modifier = Modifier.fillMaxSize()) {
             PanelTitle("WIND DIRECTION", Icons.Outlined.Explore)
-            Text(packet.windDirectionDeg?.let { "From ${compassLongLabel(it)}" } ?: "No direction data", color = TextSoft)
-            Spacer(modifier = Modifier.height(10.dp))
-            CompassGauge(packet.windDirectionDeg)
+            Spacer(modifier = Modifier.height(6.dp))
+
+            Row(
+                modifier = Modifier.fillMaxSize(),
+                horizontalArrangement = Arrangement.spacedBy(10.dp),
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Column(
+                    modifier = Modifier
+                        .weight(0.75f)
+                        .fillMaxHeight(),
+                    verticalArrangement = Arrangement.Center
+                ) {
+                    Text(
+                        "From",
+                        color = TextSoft,
+                        style = MaterialTheme.typography.bodyMedium
+                    )
+
+                    Text(
+                        compassLongLabel(packet.windDirectionDeg),
+                        color = Color.White,
+                        style = MaterialTheme.typography.titleMedium,
+                        fontWeight = FontWeight.Bold
+                    )
+
+                    Spacer(modifier = Modifier.height(10.dp))
+
+                    Row(
+                        verticalAlignment = Alignment.Bottom,
+                        horizontalArrangement = Arrangement.spacedBy(8.dp)
+                    ) {
+                        Text(
+                            packet.windDirectionDeg?.let { "${it.roundToInt()}°" } ?: "--",
+                            color = Purple,
+                            style = MaterialTheme.typography.headlineMedium,
+                            fontWeight = FontWeight.Bold
+                        )
+
+                        Text(
+                            compassLabel(packet.windDirectionDeg),
+                            color = Purple,
+                            style = MaterialTheme.typography.titleLarge,
+                            fontWeight = FontWeight.Bold,
+                            modifier = Modifier.padding(bottom = 2.dp)
+                        )
+                    }
+                }
+
+                Box(
+                    modifier = Modifier
+                        .weight(1.25f)
+                        .fillMaxHeight(),
+                    contentAlignment = Alignment.Center
+                ) {
+                    CompassGauge(packet.windDirectionDeg)
+                }
+            }
         }
     }
 }
 
 @Composable
 fun CompassGauge(deg: Double?) {
-    Box(modifier = Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
-        Canvas(modifier = Modifier.fillMaxSize()) {
-            val s = min(size.width, size.height)
-            val r = s * 0.33f
-            val center = Offset(size.width / 2f, size.height / 2f)
+    Canvas(modifier = Modifier.fillMaxSize()) {
+        val s = min(size.width, size.height)
+        val center = Offset(size.width / 2f, size.height / 2f + 4f)
 
-            drawCircle(color = Color(0xFF101D35), radius = r * 1.2f, center = center)
-            drawCircle(color = PanelBorder, radius = r * 1.2f, center = center, style = Stroke(width = 3f))
-            drawCircle(color = Color(0xFF132240), radius = r * 0.62f, center = center)
+        val outerR = s * 0.34f
+        val innerR = outerR * 0.55f
+        val labelR = outerR * 1.28f
 
-            for (i in 0 until 8) {
-                val angleDeg = i * 45.0 - 90.0
-                val angle = Math.toRadians(angleDeg)
-                val x1 = center.x + cos(angle).toFloat() * r * 0.88f
-                val y1 = center.y + sin(angle).toFloat() * r * 0.88f
-                val x2 = center.x + cos(angle).toFloat() * r * 1.12f
-                val y2 = center.y + sin(angle).toFloat() * r * 1.12f
-                drawLine(color = Color.White, start = Offset(x1, y1), end = Offset(x2, y2), strokeWidth = 3f)
+        val labelPaint = android.graphics.Paint().apply {
+            color = android.graphics.Color.WHITE
+            textSize = 16f
+            isAntiAlias = true
+            textAlign = android.graphics.Paint.Align.CENTER
+        }
+
+        val smallLabelPaint = android.graphics.Paint().apply {
+            color = android.graphics.Color.rgb(169, 184, 208)
+            textSize = 14f
+            isAntiAlias = true
+            textAlign = android.graphics.Paint.Align.CENTER
+        }
+
+        drawCircle(
+            color = Color(0xFF101D35),
+            radius = outerR * 1.05f,
+            center = center
+        )
+
+        drawCircle(
+            color = Color(0xFF2D3E5E),
+            radius = outerR,
+            center = center,
+            style = Stroke(width = 3f)
+        )
+
+        drawCircle(
+            color = Color(0xFF182844),
+            radius = innerR,
+            center = center,
+            style = Stroke(width = 2f)
+        )
+
+        // ticks
+        for (i in 0 until 32) {
+            val angleDeg = i * 11.25 - 90.0
+            val angle = Math.toRadians(angleDeg)
+            val major = i % 4 == 0
+
+            val tickOuter = outerR
+            val tickInner = if (major) outerR * 0.82f else outerR * 0.92f
+
+            drawLine(
+                color = if (major) Color.White.copy(alpha = 0.85f) else TextSoft.copy(alpha = 0.55f),
+                start = Offset(
+                    center.x + cos(angle).toFloat() * tickInner,
+                    center.y + sin(angle).toFloat() * tickInner
+                ),
+                end = Offset(
+                    center.x + cos(angle).toFloat() * tickOuter,
+                    center.y + sin(angle).toFloat() * tickOuter
+                ),
+                strokeWidth = if (major) 3f else 1.6f,
+                cap = StrokeCap.Round
+            )
+        }
+
+        // direction labels
+        val labels = listOf(
+            "N" to 0.0,
+            "NE" to 45.0,
+            "E" to 90.0,
+            "SE" to 135.0,
+            "S" to 180.0,
+            "SW" to 225.0,
+            "W" to 270.0,
+            "NW" to 315.0
+        )
+
+        labels.forEach { (label, angleDegRaw) ->
+            val angle = Math.toRadians(angleDegRaw - 90.0)
+            val x = center.x + cos(angle).toFloat() * labelR
+            val y = center.y + sin(angle).toFloat() * labelR + 8f
+
+            drawContext.canvas.nativeCanvas.drawText(
+                label,
+                x,
+                y,
+                if (label.length == 1) labelPaint else smallLabelPaint
+            )
+        }
+
+        // arrow
+        if (deg != null) {
+            val a = Math.toRadians(deg - 90.0)
+
+            val tip = Offset(
+                center.x + cos(a).toFloat() * outerR * 0.78f,
+                center.y + sin(a).toFloat() * outerR * 0.78f
+            )
+
+            val left = Offset(
+                center.x + cos(a + 2.45).toFloat() * outerR * 0.32f,
+                center.y + sin(a + 2.45).toFloat() * outerR * 0.32f
+            )
+
+            val right = Offset(
+                center.x + cos(a - 2.45).toFloat() * outerR * 0.32f,
+                center.y + sin(a - 2.45).toFloat() * outerR * 0.32f
+            )
+
+            val arrowPath = androidx.compose.ui.graphics.Path().apply {
+                moveTo(tip.x, tip.y)
+                lineTo(left.x, left.y)
+                lineTo(center.x, center.y)
+                lineTo(right.x, right.y)
+                close()
             }
 
-            if (deg != null) {
-                val arrowAngle = Math.toRadians(deg - 90.0)
-                val tip = Offset(
-                    center.x + cos(arrowAngle).toFloat() * r,
-                    center.y + sin(arrowAngle).toFloat() * r
+            drawPath(
+                path = arrowPath,
+                brush = Brush.linearGradient(
+                    colors = listOf(Purple, Color(0xFFB98CFF)),
+                    start = center,
+                    end = tip
                 )
-                val left = Offset(
-                    center.x + cos(arrowAngle + 2.55).toFloat() * r * 0.32f,
-                    center.y + sin(arrowAngle + 2.55).toFloat() * r * 0.32f
-                )
-                val right = Offset(
-                    center.x + cos(arrowAngle - 2.55).toFloat() * r * 0.32f,
-                    center.y + sin(arrowAngle - 2.55).toFloat() * r * 0.32f
-                )
-                drawLine(color = Purple, start = center, end = tip, strokeWidth = 10f, cap = StrokeCap.Round)
-                drawLine(color = Purple, start = tip, end = left, strokeWidth = 8f, cap = StrokeCap.Round)
-                drawLine(color = Purple, start = tip, end = right, strokeWidth = 8f, cap = StrokeCap.Round)
-            }
-        }
-
-        Column(horizontalAlignment = Alignment.CenterHorizontally) {
-            Text("N", color = Color.White, style = MaterialTheme.typography.titleMedium)
-            Spacer(modifier = Modifier.height(74.dp))
-            Text(deg?.let { "${it.roundToInt()}°" } ?: "—", color = Purple, style = MaterialTheme.typography.headlineLarge, fontWeight = FontWeight.Bold)
-        }
-
-        Column(modifier = Modifier.fillMaxSize(), verticalArrangement = Arrangement.SpaceBetween) {
-            Spacer(modifier = Modifier.height(1.dp))
-            Text("S", color = Color.White, modifier = Modifier.align(Alignment.CenterHorizontally))
-        }
-        Row(modifier = Modifier.fillMaxSize(), horizontalArrangement = Arrangement.SpaceBetween, verticalAlignment = Alignment.CenterVertically) {
-            Text("W", color = Color.White)
-            Text("E", color = Color.White)
+            )
         }
     }
 }
@@ -1287,6 +1617,16 @@ fun parseTelemetryPacket(text: String): TelemetryPacket {
         methanePpm = json.optDoubleOrNull("methane_ppm"),
         windSpeedMps = json.optDoubleOrNull("wind_speed_mps"),
         windDirectionDeg = json.optDoubleOrNull("wind_direction_deg"),
+        windSpeed2dMps = json.optDoubleOrNull("wind_speed_2d_mps"),
+        windUMps = json.optDoubleOrNull("wind_u_mps"),
+        windVMps = json.optDoubleOrNull("wind_v_mps"),
+        windWMps = json.optDoubleOrNull("wind_w_mps"),
+        temperatureC = json.optDoubleOrNull("temperature_c"),
+        humidityPercent = json.optDoubleOrNull("humidity_percent"),
+        pressureHpa = json.optDoubleOrNull("pressure_hpa"),
+        pitchDeg = json.optDoubleOrNull("pitch_deg"),
+        rollDeg = json.optDoubleOrNull("roll_deg"),
+        magneticHeadingDeg = json.optDoubleOrNull("magnetic_heading_deg"),
         gpsLat = json.optDoubleOrNull("gps_lat"),
         gpsLon = json.optDoubleOrNull("gps_lon"),
         radioRssi = json.optIntOrNull("radio_rssi"),
@@ -1461,3 +1801,52 @@ fun linkQualityColor(rssi: Int?, noise: Int?): Color {
         else -> Orange
     }
 }
+
+@Composable
+fun CompassLabel(
+    text: String,
+    alignment: Alignment,
+    top: androidx.compose.ui.unit.Dp = 0.dp,
+    bottom: androidx.compose.ui.unit.Dp = 0.dp,
+    start: androidx.compose.ui.unit.Dp = 0.dp,
+    end: androidx.compose.ui.unit.Dp = 0.dp
+) {
+    Box(
+        modifier = Modifier
+            .fillMaxSize()
+            .padding(start = start, end = end, top = top, bottom = bottom),
+        contentAlignment = alignment
+    ) {
+        Text(
+            text,
+            color = Color.White,
+            style = MaterialTheme.typography.headlineSmall,
+            fontWeight = FontWeight.SemiBold
+        )
+    }
+}
+
+@Composable
+fun CompassCornerLabel(
+    text: String,
+    alignment: Alignment,
+    top: androidx.compose.ui.unit.Dp = 0.dp,
+    bottom: androidx.compose.ui.unit.Dp = 0.dp,
+    start: androidx.compose.ui.unit.Dp = 0.dp,
+    end: androidx.compose.ui.unit.Dp = 0.dp
+) {
+    Box(
+        modifier = Modifier
+            .fillMaxSize()
+            .padding(start = start, end = end, top = top, bottom = bottom),
+        contentAlignment = alignment
+    ) {
+        Text(
+            text,
+            color = TextSoft,
+            style = MaterialTheme.typography.titleMedium,
+            fontWeight = FontWeight.SemiBold
+        )
+    }
+}
+fun cToF(celsius: Double): Double = (celsius * 9.0 / 5.0) + 32.0
