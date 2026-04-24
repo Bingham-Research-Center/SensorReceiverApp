@@ -135,6 +135,7 @@ enum class TrendWindow(val label: String, val durationMillis: Long) {
 data class TelemetryPacket(
     val timestamp: String = "",
     val methanePpm: Double? = null,
+
     val windSpeedMps: Double? = null,
     val windDirectionDeg: Double? = null,
     val windSpeed2dMps: Double? = null,
@@ -147,12 +148,22 @@ data class TelemetryPacket(
     val pitchDeg: Double? = null,
     val rollDeg: Double? = null,
     val magneticHeadingDeg: Double? = null,
+
+    val gpsStatus: String = "",
     val gpsLat: Double? = null,
     val gpsLon: Double? = null,
+    val gpsAltM: Double? = null,
+    val gpsSatellites: Int? = null,
+    val gpsHdop: Double? = null,
+    val gpsSpeedKnots: Double? = null,
+    val gpsCourseDeg: Double? = null,
+    val gpsTimestampUtc: String = "",
+
     val radioRssi: Int? = null,
     val radioRemoteRssi: Int? = null,
     val radioNoise: Int? = null,
     val radioRemoteNoise: Int? = null,
+
     val packetId: Long? = null
 )
 
@@ -1358,51 +1369,50 @@ fun BatteryRow(label: String, percent: Int?) {
 
 @Composable
 fun GpsLocationPanel(packet: TelemetryPacket) {
+    val hasFix = packet.gpsStatus == "fix" || packet.gpsStatus == "ok" || packet.gpsLat != null
+
     DashboardPanel(modifier = Modifier.fillMaxSize()) {
         Column(modifier = Modifier.fillMaxSize()) {
             PanelTitle("GPS LOCATION", Icons.Outlined.LocationOn)
-            Spacer(modifier = Modifier.height(10.dp))
+            Spacer(modifier = Modifier.height(8.dp))
 
             Row(
-                modifier = Modifier.weight(1f),
+                modifier = Modifier.fillMaxSize(),
                 horizontalArrangement = Arrangement.spacedBy(12.dp)
             ) {
                 Column(
-                    modifier = Modifier.weight(0.8f),
-                    verticalArrangement = Arrangement.spacedBy(10.dp)
+                    modifier = Modifier.weight(1f),
+                    verticalArrangement = Arrangement.spacedBy(6.dp)
                 ) {
-                    Text(
-                        packet.gpsLat?.let { "${format6(it)}° N" } ?: "--",
-                        color = Color.White,
-                        style = MaterialTheme.typography.titleMedium
-                    )
-                    Text(
-                        packet.gpsLon?.let { "${format6(it)}° W" } ?: "--",
-                        color = Color.White,
-                        style = MaterialTheme.typography.titleMedium
-                    )
-                    Spacer(modifier = Modifier.height(8.dp))
-                    Text("Altitude: --", color = Blue, style = MaterialTheme.typography.titleMedium)
-                    Text("Satellites: --", color = Blue, style = MaterialTheme.typography.titleMedium)
+                    GpsStat("Status", if (packet.gpsStatus.isNotBlank()) packet.gpsStatus else "--", if (hasFix) Green else Orange)
+                    GpsStat("Latitude", packet.gpsLat?.let { format6(it) } ?: "--", Color.White)
+                    GpsStat("Longitude", packet.gpsLon?.let { format6(it) } ?: "--", Color.White)
+                    GpsStat("Altitude", packet.gpsAltM?.let { "${format1(it)} m" } ?: "--", Blue)
                 }
 
-                Box(
-                    modifier = Modifier
-                        .weight(1f)
-                        .fillMaxHeight()
-                        .clip(RoundedCornerShape(16.dp))
-                        .background(Color(0xFF16223A))
-                        .border(1.dp, PanelBorder, RoundedCornerShape(16.dp)),
-                    contentAlignment = Alignment.Center
+                Column(
+                    modifier = Modifier.weight(1f),
+                    verticalArrangement = Arrangement.spacedBy(6.dp)
                 ) {
-                    Text(
-                        "MAP\nPLACEHOLDER",
-                        color = TextMuted,
-                        textAlign = TextAlign.Center
-                    )
+                    GpsStat("Satellites", packet.gpsSatellites?.toString() ?: "--", Blue)
+                    GpsStat("HDOP", packet.gpsHdop?.let { format1(it) } ?: "--", Blue)
+                    GpsStat("Speed", packet.gpsSpeedKnots?.let { "${format1(it)} kt" } ?: "--", TextSoft)
+                    GpsStat("Course", packet.gpsCourseDeg?.let { "${it.roundToInt()}°" } ?: "--", TextSoft)
                 }
             }
         }
+    }
+}
+
+@Composable
+fun GpsStat(label: String, value: String, valueColor: Color) {
+    Row(
+        modifier = Modifier.fillMaxWidth(),
+        horizontalArrangement = Arrangement.SpaceBetween,
+        verticalAlignment = Alignment.CenterVertically
+    ) {
+        Text(label, color = TextSoft, style = MaterialTheme.typography.bodySmall)
+        Text(value, color = valueColor, style = MaterialTheme.typography.bodyMedium, fontWeight = FontWeight.Bold)
     }
 }
 
@@ -1671,6 +1681,7 @@ fun parseTelemetryPacket(text: String): TelemetryPacket {
     return TelemetryPacket(
         timestamp = json.optString("timestamp", ""),
         methanePpm = json.optDoubleOrNull("methane_ppm"),
+
         windSpeedMps = json.optDoubleOrNull("wind_speed_mps"),
         windDirectionDeg = json.optDoubleOrNull("wind_direction_deg"),
         windSpeed2dMps = json.optDoubleOrNull("wind_speed_2d_mps"),
@@ -1683,12 +1694,22 @@ fun parseTelemetryPacket(text: String): TelemetryPacket {
         pitchDeg = json.optDoubleOrNull("pitch_deg"),
         rollDeg = json.optDoubleOrNull("roll_deg"),
         magneticHeadingDeg = json.optDoubleOrNull("magnetic_heading_deg"),
+
+        gpsStatus = json.optString("gps_status", ""),
         gpsLat = json.optDoubleOrNull("gps_lat"),
         gpsLon = json.optDoubleOrNull("gps_lon"),
+        gpsAltM = json.optDoubleOrNull("gps_alt_m"),
+        gpsSatellites = json.optIntOrNull("gps_satellites"),
+        gpsHdop = json.optDoubleOrNull("gps_hdop"),
+        gpsSpeedKnots = json.optDoubleOrNull("gps_speed_knots"),
+        gpsCourseDeg = json.optDoubleOrNull("gps_course_deg"),
+        gpsTimestampUtc = json.optString("gps_timestamp_utc", ""),
+
         radioRssi = json.optIntOrNull("radio_rssi"),
         radioRemoteRssi = json.optIntOrNull("radio_remote_rssi"),
         radioNoise = json.optIntOrNull("radio_noise"),
         radioRemoteNoise = json.optIntOrNull("radio_remote_noise"),
+
         packetId = json.optLongOrNull("packet_id")
     )
 }
