@@ -150,6 +150,9 @@ data class TelemetryPacket(
     val gpsLat: Double? = null,
     val gpsLon: Double? = null,
     val radioRssi: Int? = null,
+    val radioRemoteRssi: Int? = null,
+    val radioNoise: Int? = null,
+    val radioRemoteNoise: Int? = null,
     val packetId: Long? = null
 )
 
@@ -1028,7 +1031,7 @@ fun RadioLinkPanel(rssiValues: List<Int>, packet: TelemetryPacket) {
     DashboardPanel(modifier = Modifier.fillMaxSize()) {
         Column(modifier = Modifier.fillMaxSize()) {
             PanelTitle("RADIO LINK (RSSI)", Icons.Outlined.Podcasts)
-            Spacer(modifier = Modifier.height(10.dp))
+            Spacer(modifier = Modifier.height(8.dp))
 
             Row(
                 modifier = Modifier.fillMaxSize(),
@@ -1037,23 +1040,37 @@ fun RadioLinkPanel(rssiValues: List<Int>, packet: TelemetryPacket) {
                 BarChart(displayValues, Modifier.weight(1f))
 
                 Column(
-                    modifier = Modifier.width(130.dp),
-                    verticalArrangement = Arrangement.spacedBy(18.dp)
+                    modifier = Modifier.width(155.dp),
+                    verticalArrangement = Arrangement.spacedBy(8.dp)
                 ) {
-                    Text("Current", color = TextSoft)
-                    Text(
-                        packet.radioRssi?.let { "$it dBm" } ?: "--",
-                        color = Yellow,
-                        style = MaterialTheme.typography.headlineSmall,
-                        fontWeight = FontWeight.Bold
+                    RadioStat(
+                        label = "Local RSSI",
+                        value = packet.radioRssi?.let { "$it dBm" } ?: "--",
+                        color = Yellow
                     )
 
-                    Text("Average", color = TextSoft)
-                    Text(
-                        if (rssiValues.isNotEmpty()) "${rssiValues.average().roundToInt()} dBm" else "--",
-                        color = Yellow,
-                        style = MaterialTheme.typography.headlineSmall,
-                        fontWeight = FontWeight.Bold
+                    RadioStat(
+                        label = "Remote RSSI",
+                        value = packet.radioRemoteRssi?.let { "$it dBm" } ?: "--",
+                        color = Yellow
+                    )
+
+                    RadioStat(
+                        label = "Noise",
+                        value = packet.radioNoise?.let { "$it dBm" } ?: "--",
+                        color = TextSoft
+                    )
+
+                    RadioStat(
+                        label = "Remote Noise",
+                        value = packet.radioRemoteNoise?.let { "$it dBm" } ?: "--",
+                        color = TextSoft
+                    )
+
+                    RadioStat(
+                        label = "Link Quality",
+                        value = linkQuality(packet.radioRssi, packet.radioNoise),
+                        color = linkQualityColor(packet.radioRssi, packet.radioNoise)
                     )
                 }
             }
@@ -1099,37 +1116,64 @@ fun BarChart(values: List<Int>, modifier: Modifier = Modifier) {
 
 @Composable
 fun AlertsPanel(packet: TelemetryPacket) {
+    val methaneWarning = (packet.methanePpm ?: 0.0) >= 150.0
+    val windWarning = (packet.windSpeedMps ?: 0.0) >= 25.0
+
+    val alerts = buildList {
+        if (methaneWarning) {
+            add("Methane Warning")
+        }
+        if (windWarning) {
+            add("Strong Wind Warning")
+        }
+    }
+
     DashboardPanel(modifier = Modifier.fillMaxSize()) {
-        Column(modifier = Modifier.fillMaxSize(), verticalArrangement = Arrangement.spacedBy(12.dp)) {
+        Column(
+            modifier = Modifier.fillMaxSize(),
+            verticalArrangement = Arrangement.spacedBy(8.dp)
+        ) {
             PanelTitle("ALERTS", Icons.Outlined.WarningAmber)
-            Row(verticalAlignment = Alignment.CenterVertically) {
-                Box(
-                    modifier = Modifier
-                        .size(52.dp)
-                        .clip(CircleShape)
-                        .border(2.dp, Green, CircleShape),
-                    contentAlignment = Alignment.Center
-                ) {
-                    Text("✓", color = Green, style = MaterialTheme.typography.headlineMedium, fontWeight = FontWeight.Bold)
+
+            if (alerts.isEmpty()) {
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Box(
+                        modifier = Modifier
+                            .size(42.dp)
+                            .clip(CircleShape)
+                            .border(2.dp, Green, CircleShape),
+                        contentAlignment = Alignment.Center
+                    ) {
+                        Text("✓", color = Green, style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.Bold)
+                    }
+
+                    Spacer(modifier = Modifier.width(10.dp))
+
+                    Column {
+                        Text(
+                            "All Clear",
+                            color = Green,
+                            style = MaterialTheme.typography.titleMedium,
+                            fontWeight = FontWeight.Bold
+                        )
+                        Text("No active alerts", color = TextSoft)
+                    }
                 }
-                Spacer(modifier = Modifier.width(10.dp))
-                Column {
-                    Text(
-                        if ((packet.methanePpm ?: 0.0) >= 5.0) "Methane Warning" else "All Clear",
-                        color = if ((packet.methanePpm ?: 0.0) >= 5.0) Orange else Green,
-                        style = MaterialTheme.typography.headlineSmall,
-                        fontWeight = FontWeight.Bold
+            } else {
+                if (methaneWarning) {
+                    WarningAlertRow(
+                        text = "Methane Warning (${format2(packet.methanePpm ?: 0.0)} ppm)",
+                        color = Orange
                     )
-                    Text(
-                        if (packet.methanePpm == null) "No active telemetry alarms" else "No active alerts",
-                        color = TextSoft
+                }
+
+                if (windWarning) {
+                    WarningAlertRow(
+                        text = "Strong Wind (${format1(packet.windSpeedMps ?: 0.0)} m/s)",
+                        color = Yellow
                     )
                 }
             }
-            Spacer(modifier = Modifier.height(8.dp))
-            DividerLine()
-            AlertStat("Max Methane (Today)", packet.methanePpm?.let { format2(it + 1.66) + " ppm" } ?: "—")
-            AlertStat("Avg Methane (Today)", packet.methanePpm?.let { format2(it) + " ppm" } ?: "—")
         }
     }
 }
@@ -1246,6 +1290,9 @@ fun parseTelemetryPacket(text: String): TelemetryPacket {
         gpsLat = json.optDoubleOrNull("gps_lat"),
         gpsLon = json.optDoubleOrNull("gps_lon"),
         radioRssi = json.optIntOrNull("radio_rssi"),
+        radioRemoteRssi = json.optIntOrNull("radio_remote_rssi"),
+        radioNoise = json.optIntOrNull("radio_noise"),
+        radioRemoteNoise = json.optIntOrNull("radio_remote_noise"),
         packetId = json.optLongOrNull("packet_id")
     )
 }
@@ -1344,4 +1391,73 @@ fun rememberLocalTime(): String {
     }
 
     return currentTime
+}
+
+@Composable
+fun WarningAlertRow(
+    text: String,
+    color: Color
+) {
+    Row(verticalAlignment = Alignment.CenterVertically) {
+        Box(
+            modifier = Modifier
+                .size(42.dp)
+                .clip(CircleShape)
+                .border(2.dp, color, CircleShape),
+            contentAlignment = Alignment.Center
+        ) {
+            Text("!", color = color, style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.Bold)
+        }
+
+        Spacer(modifier = Modifier.width(10.dp))
+
+        Text(
+            text,
+            color = color,
+            style = MaterialTheme.typography.titleMedium,
+            fontWeight = FontWeight.Bold
+        )
+    }
+}
+
+@Composable
+fun RadioStat(
+    label: String,
+    value: String,
+    color: Color
+) {
+    Row(
+        modifier = Modifier.fillMaxWidth(),
+        horizontalArrangement = Arrangement.SpaceBetween,
+        verticalAlignment = Alignment.CenterVertically
+    ) {
+        Text(label, color = TextSoft, style = MaterialTheme.typography.bodySmall)
+        Text(value, color = color, style = MaterialTheme.typography.bodyMedium, fontWeight = FontWeight.Bold)
+    }
+}
+
+fun linkQuality(rssi: Int?, noise: Int?): String {
+    if (rssi == null || noise == null) return "--"
+
+    val snr = rssi - noise
+
+    return when {
+        snr >= 30 -> "Excellent"
+        snr >= 20 -> "Good"
+        snr >= 10 -> "Fair"
+        else -> "Poor"
+    }
+}
+
+fun linkQualityColor(rssi: Int?, noise: Int?): Color {
+    if (rssi == null || noise == null) return TextSoft
+
+    val snr = rssi - noise
+
+    return when {
+        snr >= 30 -> Green
+        snr >= 20 -> Cyan
+        snr >= 10 -> Yellow
+        else -> Orange
+    }
 }
