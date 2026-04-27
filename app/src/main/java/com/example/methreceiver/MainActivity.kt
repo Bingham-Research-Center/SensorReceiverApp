@@ -7,8 +7,13 @@ import android.os.Looper
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
+import android.net.Uri
+import android.provider.OpenableColumns
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.annotation.DrawableRes
 import androidx.core.splashscreen.SplashScreen.Companion.installSplashScreen
+import androidx.documentfile.provider.DocumentFile
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
@@ -52,13 +57,15 @@ import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Surface
-import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
+import androidx.compose.material3.AlertDialog
+import androidx.compose.material3.OutlinedTextField
+import androidx.compose.material3.TextButton
+import androidx.compose.runtime.mutableStateListOf
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
-import androidx.compose.runtime.mutableStateListOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
@@ -75,7 +82,6 @@ import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.text.font.FontWeight
-import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.graphics.nativeCanvas
 import android.content.Context
@@ -93,6 +99,7 @@ import okhttp3.WebSocket
 import okhttp3.WebSocketListener
 import org.json.JSONObject
 import java.text.SimpleDateFormat
+import java.io.OutputStreamWriter
 import java.util.Date
 import java.util.Locale
 import java.util.concurrent.TimeUnit
@@ -159,6 +166,10 @@ data class TelemetryPacket(
     val gpsCourseDeg: Double? = null,
     val gpsTimestampUtc: String = "",
 
+
+    val batteryVoltageV: Double? = null,
+    val batteryStatus: String = "",
+
     val radioRssi: Int? = null,
     val radioRemoteRssi: Int? = null,
     val radioNoise: Int? = null,
@@ -173,6 +184,24 @@ data class ConnectionState(
     val lastMessageAt: String = "—",
     val sessionStartMillis: Long = System.currentTimeMillis(),
     val packetsPerSecond: Double = 0.0
+)
+
+data class LoggedFileInfo(
+    val fileName: String,
+    val uri: Uri,
+    val rowCount: Long,
+    val sizeBytes: Long,
+    val savedAt: String
+)
+
+data class CsvLoggerState(
+    val folderUri: Uri? = null,
+    val fileName: String = "",
+    val isConfigured: Boolean = false,
+    val isLogging: Boolean = false,
+    val rowCount: Long = 0L,
+    val currentFileUri: Uri? = null,
+    val currentFileName: String = ""
 )
 
 private const val DEFAULT_WS_URL = "ws://192.168.4.1:8765"
@@ -196,8 +225,21 @@ fun ReceiverDashboardApp() {
     var latestPacket by remember { mutableStateOf(TelemetryPacket()) }
     var autoReconnect by remember { mutableStateOf(true) }
     var isConnecting by remember { mutableStateOf(false) }
+    var showSettingsDialog by remember { mutableStateOf(false) }
+    var batteryMinVoltage by remember { mutableStateOf(5.0) }
+    var batteryMaxVoltage by remember { mutableStateOf(7.4) }
+    var batteryLowPercent by remember { mutableStateOf(25f) }
+    var batteryCriticalPercent by remember { mutableStateOf(10f) }
     val methaneHistory = remember { mutableStateListOf<MethaneSample>() }
     var selectedTrendWindow by remember { mutableStateOf(TrendWindow.ONE_MIN) }
+    var loggerState by remember { mutableStateOf(CsvLoggerState(fileName = defaultCsvFileName())) }
+    var showLoggingSetup by remember { mutableStateOf(false) }
+    var loggingError by remember { mutableStateOf<String?>(null) }
+    var showLoggedFiles by remember { mutableStateOf(false) }
+    var showLogSavedMessage by remember { mutableStateOf(false) }
+    val loggedFiles = remember { mutableStateListOf<LoggedFileInfo>() }
+    var csvWriter by remember { mutableStateOf<OutputStreamWriter?>(null) }
+    val context = LocalContext.current
     val rssiHistory = remember { mutableStateListOf<Int>() }
     val packetArrivalTimes = remember { mutableStateListOf<Long>() }
     val scope = rememberCoroutineScope()
@@ -218,6 +260,12 @@ fun ReceiverDashboardApp() {
             },
             onPacket = { packet ->
                 latestPacket = packet
+
+                if (loggerState.isLogging && csvWriter != null) {
+                    csvWriter?.write(csvRow(packet))
+                    csvWriter?.flush()
+                    loggerState = loggerState.copy(rowCount = loggerState.rowCount + 1)
+                }
 
                 val now = System.currentTimeMillis()
                 packetArrivalTimes.add(now)
@@ -254,6 +302,113 @@ fun ReceiverDashboardApp() {
         )
     }
 
+    val folderPickerLauncher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.OpenDocumentTree()
+    ) { uri ->
+        if (uri != null) {
+            context.contentResolver.takePersistableUriPermission(
+                uri,
+                android.content.Intent.FLAG_GRANT_READ_URI_PERMISSION or
+                        android.content.Intent.FLAG_GRANT_WRITE_URI_PERMISSION
+            )
+
+            loggerState = loggerState.copy(
+                folderUri = uri,
+                isConfigured = loggerState.fileName.isNotBlank()
+            )
+        }
+    }
+
+    fun startLogging() {
+        try {
+            val folderUri = loggerState.folderUri
+            if (folderUri == null) {
+                loggingError = "No logging folder selected."
+                return
+            }
+
+            var fileName = loggerState.fileName.ifBlank { defaultCsvFileName() }
+            if (!fileName.endsWith(".csv", ignoreCase = true)) {
+                fileName += ".csv"
+            }
+
+            val pickedDir = DocumentFile.fromTreeUri(context, folderUri)
+
+            if (pickedDir == null || !pickedDir.canWrite()) {
+                loggingError = "Cannot access selected folder."
+                return
+            }
+
+            pickedDir.findFile(fileName)?.delete()
+
+            val newFile = pickedDir.createFile("text/csv", fileName)
+
+            if (newFile == null) {
+                loggingError = "Failed to create CSV file in selected folder."
+                return
+            }
+
+            val outputStream = context.contentResolver.openOutputStream(newFile.uri, "w")
+
+            if (outputStream == null) {
+                loggingError = "Could not open CSV file for writing."
+                return
+            }
+
+            val writer = OutputStreamWriter(outputStream)
+            writer.write(csvHeader())
+            writer.flush()
+
+            csvWriter = writer
+
+            loggerState = loggerState.copy(
+                isLogging = true,
+                rowCount = 0L,
+                currentFileUri = newFile.uri,
+                currentFileName = fileName
+            )
+        } catch (e: Exception) {
+            loggingError = e.message ?: "Failed to start logging."
+            csvWriter = null
+            loggerState = loggerState.copy(isLogging = false)
+        }
+    }
+
+    fun stopLogging() {
+        try {
+            csvWriter?.flush()
+            csvWriter?.close()
+        } catch (e: Exception) {
+            loggingError = e.message ?: "Failed to close CSV file."
+        }
+
+        csvWriter = null
+
+        val uri = loggerState.currentFileUri
+        val fileName = loggerState.currentFileName
+        val finalRows = loggerState.rowCount
+
+        if (uri != null && fileName.isNotBlank()) {
+            loggedFiles.add(
+                LoggedFileInfo(
+                    fileName = fileName,
+                    uri = uri,
+                    rowCount = finalRows,
+                    sizeBytes = getUriSizeBytes(context, uri),
+                    savedAt = nowString()
+                )
+            )
+        }
+
+        // Reset logging setup after each completed log
+        loggerState = CsvLoggerState(
+            fileName = defaultCsvFileName()
+        )
+
+        showLogSavedMessage = true
+    }
+
+
     DisposableEffect(Unit) {
         socketManager.connect(DEFAULT_WS_URL)
         onDispose { socketManager.disconnect() }
@@ -276,14 +431,13 @@ fun ReceiverDashboardApp() {
     ) {
         HeaderRow(
             state = connectionState,
-            autoReconnect = autoReconnect,
+            packet = latestPacket,
             isConnecting = isConnecting,
-            onAutoReconnectChanged = { autoReconnect = it },
-            onReconnectClicked = {
-                scope.launch(Dispatchers.IO) {
-                    socketManager.connect(DEFAULT_WS_URL)
-                }
-            }
+            batteryMinVoltage = batteryMinVoltage,
+            batteryMaxVoltage = batteryMaxVoltage,
+            batteryLowPercent = batteryLowPercent,
+            batteryCriticalPercent = batteryCriticalPercent,
+            onSettingsClicked = { showSettingsDialog = true }
         )
 
         ConnectionIssueBanner(
@@ -295,7 +449,19 @@ fun ReceiverDashboardApp() {
             }
         )
 
-        MetricGrid(packet = latestPacket)
+        MetricGrid(
+            packet = latestPacket,
+            isLogging = loggerState.isLogging,
+            loggingTarget = if (loggerState.isConfigured) "CSV Ready" else "Not configured",
+            loggedRows = loggerState.rowCount,
+            canStartLogging = loggerState.isConfigured && !loggerState.isLogging,
+            canStopLogging = loggerState.isLogging,
+            canViewData = loggedFiles.isNotEmpty(),
+            onSetupLogging = { showLoggingSetup = true },
+            onStartLogging = { startLogging() },
+            onStopLogging = { stopLogging() },
+            onViewData = { showLoggedFiles = true }
+        )
 
         Row(
             modifier = Modifier
@@ -363,14 +529,356 @@ fun ReceiverDashboardApp() {
             }
         }
     }
+
+    if (showSettingsDialog) {
+        SettingsDialog(
+            batteryMinVoltage = batteryMinVoltage,
+            batteryMaxVoltage = batteryMaxVoltage,
+            batteryLowPercent = batteryLowPercent,
+            batteryCriticalPercent = batteryCriticalPercent,
+            onBatteryMinVoltageChanged = { batteryMinVoltage = it },
+            onBatteryMaxVoltageChanged = { batteryMaxVoltage = it },
+            onBatteryLowPercentChanged = { batteryLowPercent = it },
+            onBatteryCriticalPercentChanged = { batteryCriticalPercent = it },
+            onDismiss = { showSettingsDialog = false }
+        )
+    }
+
+    if (showLoggingSetup) {
+        LoggingSetupDialog(
+            fileName = loggerState.fileName,
+            folderSelected = loggerState.folderUri != null,
+            onFileNameChanged = { loggerState = loggerState.copy(fileName = it) },
+            onChooseFolder = { folderPickerLauncher.launch(null) },
+            onSave = {
+                loggerState = loggerState.copy(
+                    isConfigured = loggerState.folderUri != null && loggerState.fileName.isNotBlank()
+                )
+                showLoggingSetup = false
+            },
+            onDismiss = { showLoggingSetup = false }
+        )
+    }
+
+    if (showLogSavedMessage) {
+        AlertDialog(
+            onDismissRequest = { showLogSavedMessage = false },
+            title = { Text("Logging stopped") },
+            text = { Text("Data stored in selected location.") },
+            confirmButton = {
+                TextButton(onClick = { showLogSavedMessage = false }) {
+                    Text("OK")
+                }
+            }
+        )
+    }
+
+    if (showLoggedFiles) {
+        AlertDialog(
+            onDismissRequest = { showLoggedFiles = false },
+            title = { Text("Logged CSV Files") },
+            text = {
+                Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                    if (loggedFiles.isEmpty()) {
+                        Text("No logged files yet.")
+                    } else {
+                        loggedFiles.forEach { file ->
+                            Text(file.fileName)
+                            Text(
+                                "Rows: ${file.rowCount}   Size: ${file.sizeBytes} bytes   Saved: ${file.savedAt}",
+                                color = TextSoft
+                            )
+                        }
+                    }
+                }
+            },
+            confirmButton = {
+                TextButton(onClick = { showLoggedFiles = false }) {
+                    Text("Close")
+                }
+            }
+        )
+    }
+
+    if (loggingError != null) {
+        AlertDialog(
+            onDismissRequest = { loggingError = null },
+            title = { Text("Logging error") },
+            text = { Text(loggingError ?: "Unknown error") },
+            confirmButton = {
+                TextButton(onClick = { loggingError = null }) {
+                    Text("OK")
+                }
+            }
+        )
+    }
+}
+
+@Composable
+fun SettingsDialog(
+    batteryMinVoltage: Double,
+    batteryMaxVoltage: Double,
+    batteryLowPercent: Float,
+    batteryCriticalPercent: Float,
+    onBatteryMinVoltageChanged: (Double) -> Unit,
+    onBatteryMaxVoltageChanged: (Double) -> Unit,
+    onBatteryLowPercentChanged: (Float) -> Unit,
+    onBatteryCriticalPercentChanged: (Float) -> Unit,
+    onDismiss: () -> Unit
+) {
+    var selectedSection by remember { mutableStateOf("Battery") }
+
+    var minVoltageText by remember { mutableStateOf(batteryMinVoltage.toString()) }
+    var maxVoltageText by remember { mutableStateOf(batteryMaxVoltage.toString()) }
+    var lowText by remember { mutableStateOf(batteryLowPercent.toInt().toString()) }
+    var criticalText by remember { mutableStateOf(batteryCriticalPercent.toInt().toString()) }
+
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text("Settings") },
+        text = {
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .height(320.dp),
+                horizontalArrangement = Arrangement.spacedBy(16.dp)
+            ) {
+                Column(
+                    modifier = Modifier.width(130.dp),
+                    verticalArrangement = Arrangement.spacedBy(8.dp)
+                ) {
+                    SettingsSideItem(
+                        text = "Battery",
+                        selected = selectedSection == "Battery",
+                        onClick = { selectedSection = "Battery" }
+                    )
+
+                    SettingsSideItem(
+                        text = "Logging",
+                        selected = selectedSection == "Logging",
+                        onClick = { selectedSection = "Logging" }
+                    )
+
+                    SettingsSideItem(
+                        text = "Connection",
+                        selected = selectedSection == "Connection",
+                        onClick = { selectedSection = "Connection" }
+                    )
+
+                    SettingsSideItem(
+                        text = "Display",
+                        selected = selectedSection == "Display",
+                        onClick = { selectedSection = "Display" }
+                    )
+                }
+
+                Column(
+                    modifier = Modifier.weight(1f),
+                    verticalArrangement = Arrangement.spacedBy(10.dp)
+                ) {
+                    when (selectedSection) {
+                        "Battery" -> {
+                            Text("Battery Calibration", fontWeight = FontWeight.Bold)
+
+                            OutlinedTextField(
+                                value = minVoltageText,
+                                onValueChange = { minVoltageText = it },
+                                label = { Text("Minimum voltage") },
+                                singleLine = true
+                            )
+
+                            OutlinedTextField(
+                                value = maxVoltageText,
+                                onValueChange = { maxVoltageText = it },
+                                label = { Text("Maximum voltage") },
+                                singleLine = true
+                            )
+
+                            OutlinedTextField(
+                                value = lowText,
+                                onValueChange = { lowText = it },
+                                label = { Text("Low warning threshold (%)") },
+                                singleLine = true
+                            )
+
+                            OutlinedTextField(
+                                value = criticalText,
+                                onValueChange = { criticalText = it },
+                                label = { Text("Critical threshold (%)") },
+                                singleLine = true
+                            )
+
+                            Text(
+                                "Battery percent is calculated from measured voltage using min/max voltage.",
+                                color = TextSoft,
+                                style = MaterialTheme.typography.bodySmall
+                            )
+                        }
+
+                        else -> {
+                            Text("$selectedSection settings coming later.", color = TextSoft)
+                        }
+                    }
+                }
+            }
+        },
+        confirmButton = {
+            TextButton(
+                onClick = {
+                    minVoltageText.toDoubleOrNull()?.let(onBatteryMinVoltageChanged)
+                    maxVoltageText.toDoubleOrNull()?.let(onBatteryMaxVoltageChanged)
+                    lowText.toFloatOrNull()?.let(onBatteryLowPercentChanged)
+                    criticalText.toFloatOrNull()?.let(onBatteryCriticalPercentChanged)
+                    onDismiss()
+                }
+            ) {
+                Text("Save")
+            }
+        },
+        dismissButton = {
+            TextButton(onClick = onDismiss) {
+                Text("Cancel")
+            }
+        }
+    )
+}
+
+@Composable
+fun SettingsSideItem(
+    text: String,
+    selected: Boolean,
+    onClick: () -> Unit
+) {
+    Box(
+        modifier = Modifier
+            .fillMaxWidth()
+            .clip(RoundedCornerShape(10.dp))
+            .background(if (selected) Blue.copy(alpha = 0.18f) else Color.Transparent)
+            .border(
+                1.dp,
+                if (selected) Blue.copy(alpha = 0.7f) else PanelBorder.copy(alpha = 0.4f),
+                RoundedCornerShape(10.dp)
+            )
+            .clickable { onClick() }
+            .padding(horizontal = 10.dp, vertical = 8.dp)
+    ) {
+        Text(
+            text,
+            color = if (selected) Blue else TextSoft,
+            fontWeight = if (selected) FontWeight.Bold else FontWeight.Normal
+        )
+    }
+}
+
+@Composable
+fun BatteryHeaderStatus(
+    voltage: Double?,
+    minVoltage: Double,
+    maxVoltage: Double,
+    lowPercent: Float,
+    criticalPercent: Float
+) {
+    val percent = batteryPercentFromVoltage(voltage, minVoltage, maxVoltage)
+    val color = batteryColor(percent, lowPercent, criticalPercent)
+
+    Column(
+        modifier = Modifier.width(150.dp),
+        verticalArrangement = Arrangement.spacedBy(4.dp)
+    ) {
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.SpaceBetween
+        ) {
+            Text("Battery", color = TextSoft, style = MaterialTheme.typography.bodySmall)
+            Text(
+                voltage?.let { "${format1(it)} V" } ?: "--",
+                color = color,
+                style = MaterialTheme.typography.bodySmall,
+                fontWeight = FontWeight.Bold
+            )
+        }
+
+        Box(
+            modifier = Modifier
+                .fillMaxWidth()
+                .height(9.dp)
+                .clip(RoundedCornerShape(99.dp))
+                .background(Color(0xFF16233F))
+        ) {
+            Box(
+                modifier = Modifier
+                    .fillMaxHeight()
+                    .fillMaxWidth(percent / 100f)
+                    .clip(RoundedCornerShape(99.dp))
+                    .background(color)
+            )
+        }
+
+        Text(
+            if (voltage == null) "No battery data" else batteryLabel(percent, lowPercent, criticalPercent),
+            color = color,
+            style = MaterialTheme.typography.bodySmall,
+            fontWeight = FontWeight.SemiBold
+        )
+    }
+}
+
+@Composable
+fun LoggingSetupDialog(
+    fileName: String,
+    folderSelected: Boolean,
+    onFileNameChanged: (String) -> Unit,
+    onChooseFolder: () -> Unit,
+    onSave: () -> Unit,
+    onDismiss: () -> Unit
+) {
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text("Logging Setup") },
+        text = {
+            Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
+                OutlinedTextField(
+                    value = fileName,
+                    onValueChange = onFileNameChanged,
+                    label = { Text("CSV file name") },
+                    singleLine = true
+                )
+
+                Button(onClick = onChooseFolder) {
+                    Text(if (folderSelected) "Change Folder" else "Choose Folder")
+                }
+
+                Text(
+                    if (folderSelected) "Storage location selected" else "Choose tablet, USB, or SD card folder",
+                    color = if (folderSelected) Green else TextSoft
+                )
+            }
+        },
+        confirmButton = {
+            TextButton(
+                onClick = onSave,
+                enabled = fileName.isNotBlank() && folderSelected
+            ) {
+                Text("Save")
+            }
+        },
+        dismissButton = {
+            TextButton(onClick = onDismiss) {
+                Text("Cancel")
+            }
+        }
+    )
 }
 @Composable
 fun HeaderRow(
     state: ConnectionState,
-    autoReconnect: Boolean,
+    packet: TelemetryPacket,
     isConnecting: Boolean,
-    onAutoReconnectChanged: (Boolean) -> Unit,
-    onReconnectClicked: () -> Unit
+    batteryMinVoltage: Double,
+    batteryMaxVoltage: Double,
+    batteryLowPercent: Float,
+    batteryCriticalPercent: Float,
+    onSettingsClicked: () -> Unit
 ) {
     val localTime = rememberLocalTime()
 
@@ -412,21 +920,24 @@ fun HeaderRow(
                     CircularProgressIndicator(modifier = Modifier.size(22.dp), color = Cyan, strokeWidth = 2.dp)
                     Spacer(modifier = Modifier.width(12.dp))
                 }
-                Text("Auto", color = TextSoft)
-                Spacer(modifier = Modifier.width(6.dp))
-                Switch(checked = autoReconnect, onCheckedChange = onAutoReconnectChanged)
-                Spacer(modifier = Modifier.width(6.dp))
+                BatteryHeaderStatus(
+                    voltage = packet.batteryVoltageV,
+                    minVoltage = batteryMinVoltage,
+                    maxVoltage = batteryMaxVoltage,
+                    lowPercent = batteryLowPercent,
+                    criticalPercent = batteryCriticalPercent
+                )
 
-                Button(
-                    onClick = onReconnectClicked,
-                    shape = RoundedCornerShape(12.dp),
-                    contentPadding = PaddingValues(horizontal = 10.dp, vertical = 6.dp),
-                    colors = ButtonDefaults.buttonColors(containerColor = Cyan),
+                Spacer(modifier = Modifier.width(12.dp))
+
+                Icon(
+                    imageVector = Icons.Outlined.Settings,
+                    contentDescription = "Settings",
+                    tint = TextSoft,
                     modifier = Modifier
-                        .height(36.dp)
-                ) {
-                    Text("Reconnect", style = MaterialTheme.typography.bodyMedium)
-                }
+                        .size(28.dp)
+                        .clickable { onSettingsClicked() }
+                )
             }
         }
     }
@@ -529,7 +1040,19 @@ fun StatusBadge(label: String, value: String, icon: androidx.compose.ui.graphics
 }
 
 @Composable
-fun MetricGrid(packet: TelemetryPacket) {
+fun MetricGrid(
+    packet: TelemetryPacket,
+    isLogging: Boolean,
+    loggingTarget: String,
+    loggedRows: Long,
+    canStartLogging: Boolean,
+    canStopLogging: Boolean,
+    canViewData: Boolean,
+    onSetupLogging: () -> Unit,
+    onStartLogging: () -> Unit,
+    onStopLogging: () -> Unit,
+    onViewData: () -> Unit
+) {
     Row(
         modifier = Modifier
             .fillMaxWidth()
@@ -566,19 +1089,18 @@ fun MetricGrid(packet: TelemetryPacket) {
             rightColor = Blue
         )
 
-        DualMetricCard(
+        LoggingMetricCard(
             modifier = Modifier.weight(1f),
-            title = "GPS",
-            leftLabel = "LAT",
-            leftValue = packet.gpsLat?.let { format6(it) } ?: "--",
-            leftUnit = "",
-            leftIcon = Icons.Outlined.LocationOn,
-            leftColor = Blue,
-            rightLabel = "LON",
-            rightValue = packet.gpsLon?.let { format6(it) } ?: "--",
-            rightUnit = "",
-            rightIcon = Icons.Outlined.LocationOn,
-            rightColor = Blue
+            isLogging = isLogging,
+            loggingTarget = loggingTarget,
+            loggedRows = loggedRows,
+            canStartLogging = canStartLogging,
+            canStopLogging = canStopLogging,
+            canViewData = canViewData,
+            onSetupLogging = onSetupLogging,
+            onStartLogging = onStartLogging,
+            onStopLogging = onStopLogging,
+            onViewData = onViewData
         )
 
         SingleMetricCard(
@@ -748,80 +1270,6 @@ fun CompactMetricItem(
     }
 }
 
-data class MetricUi(
-    val label: String,
-    val value: String,
-    val unit: String,
-    val subtitle: String,
-    val accent: Color,
-    val icon: androidx.compose.ui.graphics.vector.ImageVector,
-    val footerRight: String = ""
-)
-
-@Composable
-fun MetricCard(metric: MetricUi) {
-    DashboardPanel {
-        Column(
-            verticalArrangement = Arrangement.SpaceBetween,
-            modifier = Modifier.fillMaxSize()
-        ) {
-            Row(
-                verticalAlignment = Alignment.CenterVertically,
-                horizontalArrangement = Arrangement.spacedBy(6.dp)
-            ) {
-                Icon(
-                    imageVector = metric.icon,
-                    contentDescription = null,
-                    tint = metric.accent,
-                    modifier = Modifier.size(18.dp)
-                )
-                Text(
-                    metric.label,
-                    color = TextSoft,
-                    style = MaterialTheme.typography.bodyMedium,
-                    fontWeight = FontWeight.SemiBold
-                )
-            }
-
-            Row(verticalAlignment = Alignment.Bottom) {
-                Text(
-                    metric.value,
-                    color = metric.accent,
-                    style = MaterialTheme.typography.headlineMedium,
-                    fontWeight = FontWeight.Bold
-                )
-                if (metric.unit.isNotEmpty()) {
-                    Spacer(modifier = Modifier.width(6.dp))
-                    Text(
-                        metric.unit,
-                        color = Color.White,
-                        style = MaterialTheme.typography.titleMedium
-                    )
-                }
-            }
-
-            Row(
-                modifier = Modifier.fillMaxWidth(),
-                horizontalArrangement = Arrangement.SpaceBetween
-            ) {
-                Text(
-                    metric.subtitle,
-                    color = metric.accent,
-                    style = MaterialTheme.typography.bodyMedium
-                )
-                if (metric.footerRight.isNotEmpty()) {
-                    Text(
-                        metric.footerRight,
-                        color = TextSoft,
-                        style = MaterialTheme.typography.bodySmall
-                    )
-                }
-            }
-        }
-    }
-}
-
-
 @Composable
 fun PanelTitle(
     text: String,
@@ -913,6 +1361,116 @@ fun TinyTimeChip(
     }
 }
 
+@Composable
+fun LoggingMetricCard(
+    modifier: Modifier = Modifier,
+    isLogging: Boolean,
+    loggingTarget: String,
+    loggedRows: Long,
+    canStartLogging: Boolean,
+    canStopLogging: Boolean,
+    canViewData: Boolean,
+    onSetupLogging: () -> Unit,
+    onStartLogging: () -> Unit,
+    onStopLogging: () -> Unit,
+    onViewData: () -> Unit
+) {
+    DashboardPanel(modifier = modifier) {
+        Column(
+            modifier = Modifier.fillMaxSize(),
+            verticalArrangement = Arrangement.SpaceBetween
+        ) {
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Text(
+                    "LOGGING",
+                    color = TextSoft,
+                    style = MaterialTheme.typography.bodySmall,
+                    fontWeight = FontWeight.Bold
+                )
+
+                Text(
+                    if (isLogging) "ACTIVE" else "IDLE",
+                    color = if (isLogging) Green else TextMuted,
+                    style = MaterialTheme.typography.bodySmall,
+                    fontWeight = FontWeight.Bold
+                )
+            }
+
+            Column(verticalArrangement = Arrangement.spacedBy(2.dp)) {
+                Text(
+                    loggingTarget,
+                    color = if (loggingTarget == "Not configured") TextMuted else Color.White,
+                    style = MaterialTheme.typography.bodySmall
+                )
+
+                Text(
+                    "Rows: $loggedRows",
+                    color = TextSoft,
+                    style = MaterialTheme.typography.bodySmall
+                )
+            }
+
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.spacedBy(6.dp)
+            ) {
+                LogButton(
+                    text = "Setup",
+                    color = Blue,
+                    enabled = !isLogging,
+                    onClick = onSetupLogging
+                )
+
+                LogButton(
+                    text = if (isLogging) "Stop" else "Start",
+                    color = if (isLogging) Orange else Green,
+                    enabled = if (isLogging) canStopLogging else canStartLogging,
+                    onClick = if (isLogging) onStopLogging else onStartLogging
+                )
+
+                LogButton(
+                    text = "View",
+                    color = Cyan,
+                    enabled = canViewData,
+                    onClick = onViewData
+                )
+            }
+        }
+    }
+}
+
+@Composable
+fun LogButton(
+    text: String,
+    color: Color,
+    enabled: Boolean = true,
+    onClick: () -> Unit
+) {
+    Box(
+        modifier = Modifier
+            .clip(RoundedCornerShape(8.dp))
+            .background(if (enabled) color.copy(alpha = 0.16f) else TextMuted.copy(alpha = 0.08f))
+            .border(
+                1.dp,
+                if (enabled) color.copy(alpha = 0.7f) else TextMuted.copy(alpha = 0.25f),
+                RoundedCornerShape(8.dp)
+            )
+            .clickable(enabled = enabled) { onClick() }
+            .padding(horizontal = 8.dp, vertical = 5.dp),
+        contentAlignment = Alignment.Center
+    ) {
+        Text(
+            text,
+            color = if (enabled) color else TextMuted,
+            style = MaterialTheme.typography.bodySmall,
+            fontWeight = FontWeight.Bold
+        )
+    }
+}
 @Composable
 fun MethaneLineChart(
     samples: List<MethaneSample>,
@@ -1574,18 +2132,6 @@ fun AlertsPanel(packet: TelemetryPacket) {
     }
 }
 
-@Composable
-fun DividerLine() {
-    Box(modifier = Modifier.fillMaxWidth().height(1.dp).background(Color(0xFF1B2A47)))
-}
-
-@Composable
-fun AlertStat(label: String, value: String) {
-    Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
-        Text(label, color = TextSoft)
-        Text(value, color = Green, fontWeight = FontWeight.SemiBold)
-    }
-}
 
 @Composable
 fun DashboardPanel(
@@ -1704,6 +2250,10 @@ fun parseTelemetryPacket(text: String): TelemetryPacket {
         gpsSpeedKnots = json.optDoubleOrNull("gps_speed_knots"),
         gpsCourseDeg = json.optDoubleOrNull("gps_course_deg"),
         gpsTimestampUtc = json.optString("gps_timestamp_utc", ""),
+
+
+        batteryVoltageV = json.optDoubleOrNull("battery_voltage_v"),
+        batteryStatus = json.optString("battery_status", ""),
 
         radioRssi = json.optIntOrNull("radio_rssi"),
         radioRemoteRssi = json.optIntOrNull("radio_remote_rssi"),
@@ -1903,29 +2453,7 @@ fun CompassLabel(
     }
 }
 
-@Composable
-fun CompassCornerLabel(
-    text: String,
-    alignment: Alignment,
-    top: androidx.compose.ui.unit.Dp = 0.dp,
-    bottom: androidx.compose.ui.unit.Dp = 0.dp,
-    start: androidx.compose.ui.unit.Dp = 0.dp,
-    end: androidx.compose.ui.unit.Dp = 0.dp
-) {
-    Box(
-        modifier = Modifier
-            .fillMaxSize()
-            .padding(start = start, end = end, top = top, bottom = bottom),
-        contentAlignment = alignment
-    ) {
-        Text(
-            text,
-            color = TextSoft,
-            style = MaterialTheme.typography.titleMedium,
-            fontWeight = FontWeight.SemiBold
-        )
-    }
-}
+
 fun cToF(celsius: Double): Double = (celsius * 9.0 / 5.0) + 32.0
 
 fun shortConnectionStatus(status: String): String {
@@ -1935,5 +2463,78 @@ fun shortConnectionStatus(status: String): String {
         status.contains("Connection refused", ignoreCase = true) -> "Refused"
         status.contains("Connecting", ignoreCase = true) -> "Connecting"
         else -> status.take(18)
+    }
+}
+
+fun defaultCsvFileName(): String {
+    val stamp = SimpleDateFormat("yyyyMMdd_HHmmss", Locale.US).format(Date())
+    return "meth_telemetry_$stamp.csv"
+}
+
+fun csvHeader(): String {
+    return "timestamp_iso,gps_lat_deg,gps_lon_deg,ch4_ppm,wind_u_mps,wind_v_mps,wind_w_mps,wind_total_mps,wind_direction_deg\n"
+}
+
+fun csvRow(packet: TelemetryPacket): String {
+    fun d(value: Double?): String = value?.let { String.format(Locale.US, "%.6f", it) } ?: ""
+
+    return listOf(
+        packet.timestamp,
+        d(packet.gpsLat),
+        d(packet.gpsLon),
+        d(packet.methanePpm),
+        d(packet.windUMps),
+        d(packet.windVMps),
+        d(packet.windWMps),
+        d(packet.windSpeedMps),
+        d(packet.windDirectionDeg)
+    ).joinToString(",") + "\n"
+}
+
+fun getUriSizeBytes(context: android.content.Context, uri: Uri): Long {
+    return context.contentResolver.query(uri, null, null, null, null)?.use { cursor ->
+        val sizeIndex = cursor.getColumnIndex(OpenableColumns.SIZE)
+        if (cursor.moveToFirst() && sizeIndex >= 0) {
+            cursor.getLong(sizeIndex)
+        } else {
+            0L
+        }
+    } ?: 0L
+}
+
+fun batteryPercentFromVoltage(
+    voltage: Double?,
+    minVoltage: Double,
+    maxVoltage: Double
+): Float {
+    if (voltage == null) return 0f
+    if (maxVoltage <= minVoltage) return 0f
+
+    return (((voltage - minVoltage) / (maxVoltage - minVoltage)) * 100.0)
+        .coerceIn(0.0, 100.0)
+        .toFloat()
+}
+
+fun batteryColor(
+    percent: Float,
+    lowPercent: Float,
+    criticalPercent: Float
+): Color {
+    return when {
+        percent <= criticalPercent -> Orange
+        percent <= lowPercent -> Yellow
+        else -> Green
+    }
+}
+
+fun batteryLabel(
+    percent: Float,
+    lowPercent: Float,
+    criticalPercent: Float
+): String {
+    return when {
+        percent <= criticalPercent -> "Critical"
+        percent <= lowPercent -> "Low"
+        else -> "Good"
     }
 }
