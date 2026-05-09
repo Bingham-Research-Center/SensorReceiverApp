@@ -186,7 +186,8 @@ data class ConnectionState(
     val status: String = "Disconnected",
     val lastMessageAt: String = "—",
     val sessionStartMillis: Long = System.currentTimeMillis(),
-    val packetsPerSecond: Double = 0.0
+    val packetsPerSecond: Double = 0.0,
+    val lastPacketMillis: Long = 0L
 )
 
 data class LoggedFileInfo(
@@ -228,6 +229,7 @@ fun ReceiverDashboardApp() {
     var latestPacket by remember { mutableStateOf(TelemetryPacket()) }
     var autoReconnect by remember { mutableStateOf(true) }
     var isConnecting by remember { mutableStateOf(false) }
+    var uiNowMillis by remember { mutableStateOf(System.currentTimeMillis()) }
     var showSettingsDialog by remember { mutableStateOf(false) }
     var batteryMinVoltage by remember { mutableStateOf(5.0) }
     var batteryMaxVoltage by remember { mutableStateOf(7.4) }
@@ -246,6 +248,18 @@ fun ReceiverDashboardApp() {
     val rssiHistory = remember { mutableStateListOf<Int>() }
     val packetArrivalTimes = remember { mutableStateListOf<Long>() }
     val scope = rememberCoroutineScope()
+
+    LaunchedEffect(Unit) {
+        while (true) {
+            uiNowMillis = System.currentTimeMillis()
+            delay(1000)
+        }
+    }
+
+    val telemetryStale =
+        connectionState.connected &&
+                connectionState.lastPacketMillis > 0L &&
+                uiNowMillis - connectionState.lastPacketMillis > 5000L
 
     val socketManager = remember {
         TelemetryWebSocketClient(
@@ -286,7 +300,8 @@ fun ReceiverDashboardApp() {
                     connected = true,
                     status = "Streaming",
                     lastMessageAt = nowString(),
-                    packetsPerSecond = rate
+                    packetsPerSecond = rate,
+                    lastPacketMillis = now
                 )
 
                 packet.methanePpm?.let {
@@ -452,6 +467,11 @@ fun ReceiverDashboardApp() {
             }
         )
 
+        TelemetryStaleBanner(
+            stale = telemetryStale,
+            lastPacketAt = connectionState.lastMessageAt
+        )
+
         MetricGrid(
             packet = latestPacket,
             isLogging = loggerState.isLogging,
@@ -614,6 +634,51 @@ fun ReceiverDashboardApp() {
                 }
             }
         )
+    }
+}
+
+@Composable
+fun TelemetryStaleBanner(
+    stale: Boolean,
+    lastPacketAt: String
+) {
+    if (!stale) return
+
+    DashboardPanel(
+        modifier = Modifier.fillMaxWidth(),
+        containerColor = Color(0xFF261B10),
+        contentPadding = 12.dp
+    ) {
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            Box(
+                modifier = Modifier
+                    .size(42.dp)
+                    .clip(CircleShape)
+                    .border(2.dp, Yellow, CircleShape),
+                contentAlignment = Alignment.Center
+            ) {
+                Text("!", color = Yellow, fontWeight = FontWeight.Bold)
+            }
+
+            Spacer(modifier = Modifier.width(12.dp))
+
+            Column {
+                Text(
+                    "Sensor station application on drone is stopped running! Reboot the broadcasting Raspberry Pi",
+                    color = Yellow,
+                    style = MaterialTheme.typography.titleMedium,
+                    fontWeight = FontWeight.Bold
+                )
+                Text(
+                    "Receiver Pi is online, but no new sensor packets are arriving. Last packet: $lastPacketAt",
+                    color = TextSoft,
+                    style = MaterialTheme.typography.bodySmall
+                )
+            }
+        }
     }
 }
 
