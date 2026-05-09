@@ -48,6 +48,7 @@ import androidx.compose.material.icons.outlined.ShowChart
 import androidx.compose.material.icons.outlined.Settings
 import androidx.compose.material.icons.outlined.WaterDrop
 import androidx.compose.material.icons.outlined.Thermostat
+import androidx.compose.material.icons.outlined.Cloud
 import androidx.compose.material3.Icon
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
@@ -142,6 +143,8 @@ enum class TrendWindow(val label: String, val durationMillis: Long) {
 data class TelemetryPacket(
     val timestamp: String = "",
     val methanePpm: Double? = null,
+    val methaneState: Int? = null,
+    val methaneStatus: String = "",
 
     val windSpeedMps: Double? = null,
     val windDirectionDeg: Double? = null,
@@ -1074,23 +1077,28 @@ fun MetricGrid(
             rightColor = Cyan
         )
 
-        DualMetricCard(
+        TripleMetricCard(
             modifier = Modifier.weight(1f),
             title = "ENVIRONMENT",
-            leftLabel = "TEMP",
-            leftValue = packet.temperatureC?.let { format1(cToF(it)) } ?: "--",
-            leftUnit = "°F",
-            leftIcon = Icons.Outlined.Thermostat,
-            leftColor = Orange,
-            rightLabel = "HUMIDITY",
-            rightValue = packet.humidityPercent?.let { format1(it) } ?: "--",
-            rightUnit = "%",
-            rightIcon = Icons.Outlined.WaterDrop,
-            rightColor = Blue
+            firstLabel = "TEMP.",
+            firstValue = packet.temperatureC?.let { format1(cToF(it)) } ?: "--",
+            firstUnit = "°F",
+            firstIcon = Icons.Outlined.Thermostat,
+            firstColor = Orange,
+            secondLabel = "HUMIDITY",
+            secondValue = packet.humidityPercent?.let { format1(it) } ?: "--",
+            secondUnit = "%",
+            secondIcon = Icons.Outlined.WaterDrop,
+            secondColor = Blue,
+            thirdLabel = "PRESSURE",
+            thirdValue = packet.pressureHpa?.let { format1(it) } ?: "--",
+            thirdUnit = "hPa",
+            thirdIcon = Icons.Outlined.Cloud,
+            thirdColor = Cyan
         )
 
         LoggingMetricCard(
-            modifier = Modifier.weight(1f),
+            modifier = Modifier.weight(0.85f),
             isLogging = isLogging,
             loggingTarget = loggingTarget,
             loggedRows = loggedRows,
@@ -1103,15 +1111,9 @@ fun MetricGrid(
             onViewData = onViewData
         )
 
-        SingleMetricCard(
-            modifier = Modifier.weight(1f),
-            title = "RADIO",
-            label = "RSSI",
-            value = packet.radioRssi?.toString() ?: "--",
-            unit = "dBm",
-            subtitle = signalQuality(packet.radioRssi),
-            icon = Icons.Outlined.Podcasts,
-            color = Yellow
+        DeviceStatusCard(
+            modifier = Modifier.weight(1.15f),
+            packet = packet
         )
     }
 }
@@ -1177,17 +1179,119 @@ fun DualMetricCard(
 }
 
 @Composable
-fun SingleMetricCard(
+fun DeviceStatusCard(
+    modifier: Modifier = Modifier,
+    packet: TelemetryPacket
+) {
+    val methaneError =
+        packet.methaneStatus.startsWith("error", ignoreCase = true) &&
+                packet.methaneStatus != "error_0"
+
+    val methaneHealthText = if (methaneError) {
+        "Error: ${methaneErrorLabel(packet.methaneStatus)}"
+    } else {
+        "Health: Good"
+    }
+
+    val methaneStatusText = when {
+        packet.methaneStatus.isBlank() -> "--"
+        else -> methaneErrorLabel(packet.methaneStatus)
+    }
+
+    DashboardPanel(modifier = modifier, contentPadding = 12.dp) {
+        Column(
+            modifier = Modifier.fillMaxSize(),
+            verticalArrangement = Arrangement.SpaceBetween
+        ) {
+            Text(
+                "DEVICE STATUS",
+                color = TextSoft,
+                style = MaterialTheme.typography.bodySmall,
+                fontWeight = FontWeight.Bold
+            )
+
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.spacedBy(14.dp)
+            ) {
+                Column(
+                    modifier = Modifier.weight(1.15f),
+                    verticalArrangement = Arrangement.spacedBy(4.dp)
+                ) {
+                    Text(
+                        "Methane Sensor",
+                        color = Color.White,
+                        style = MaterialTheme.typography.bodySmall,
+                        fontWeight = FontWeight.Bold
+                    )
+
+                    Text(
+                        packet.methaneState?.let {
+                            "State: ${methaneStateShortLabel(it)} ($it)"
+                        } ?: "State: --",
+                        color = Green,
+                        style = MaterialTheme.typography.bodySmall,
+                        fontWeight = FontWeight.SemiBold
+                    )
+                    Text(
+                        methaneHealthText,
+                        color = if (methaneError) Orange else Green,
+                        style = MaterialTheme.typography.bodySmall,
+                        fontWeight = FontWeight.Bold
+                    )
+                }
+
+                Column(
+                    modifier = Modifier.weight(0.85f),
+                    verticalArrangement = Arrangement.spacedBy(4.dp)
+                ) {
+                    Text(
+                        "Wind Sensor",
+                        color = Color.White,
+                        style = MaterialTheme.typography.bodySmall,
+                        fontWeight = FontWeight.Bold
+                    )
+
+                    Text(
+                        "State: --",
+                        color = TextSoft,
+                        style = MaterialTheme.typography.bodySmall,
+                        fontWeight = FontWeight.SemiBold
+                    )
+
+                    Text(
+                        "Health: --",
+                        color = TextSoft,
+                        style = MaterialTheme.typography.bodySmall,
+                        fontWeight = FontWeight.SemiBold
+                    )
+                }
+            }
+        }
+    }
+}
+
+@Composable
+fun TripleMetricCard(
     modifier: Modifier = Modifier,
     title: String,
-    label: String,
-    value: String,
-    unit: String,
-    subtitle: String,
-    icon: androidx.compose.ui.graphics.vector.ImageVector,
-    color: Color
+    firstLabel: String,
+    firstValue: String,
+    firstUnit: String,
+    firstIcon: androidx.compose.ui.graphics.vector.ImageVector,
+    firstColor: Color,
+    secondLabel: String,
+    secondValue: String,
+    secondUnit: String,
+    secondIcon: androidx.compose.ui.graphics.vector.ImageVector,
+    secondColor: Color,
+    thirdLabel: String,
+    thirdValue: String,
+    thirdUnit: String,
+    thirdIcon: androidx.compose.ui.graphics.vector.ImageVector,
+    thirdColor: Color
 ) {
-    DashboardPanel(modifier = modifier) {
+    DashboardPanel(modifier = modifier, contentPadding = 12.dp) {
         Column(
             modifier = Modifier.fillMaxSize(),
             verticalArrangement = Arrangement.SpaceBetween
@@ -1199,21 +1303,37 @@ fun SingleMetricCard(
                 fontWeight = FontWeight.Bold
             )
 
-            CompactMetricItem(
+            Row(
                 modifier = Modifier.fillMaxWidth(),
-                label = label,
-                value = value,
-                unit = unit,
-                icon = icon,
-                color = color
-            )
+                horizontalArrangement = Arrangement.spacedBy(6.dp)
+            ) {
+                CompactMetricItem(
+                    modifier = Modifier.weight(1f),
+                    label = firstLabel,
+                    value = firstValue,
+                    unit = firstUnit,
+                    icon = firstIcon,
+                    color = firstColor
+                )
 
-            Text(
-                subtitle,
-                color = color,
-                style = MaterialTheme.typography.bodySmall,
-                fontWeight = FontWeight.SemiBold
-            )
+                CompactMetricItem(
+                    modifier = Modifier.weight(1f),
+                    label = secondLabel,
+                    value = secondValue,
+                    unit = secondUnit,
+                    icon = secondIcon,
+                    color = secondColor
+                )
+
+                CompactMetricItem(
+                    modifier = Modifier.weight(1f),
+                    label = thirdLabel,
+                    value = thirdValue,
+                    unit = thirdUnit,
+                    icon = thirdIcon,
+                    color = thirdColor
+                )
+            }
         }
     }
 }
@@ -2227,6 +2347,8 @@ fun parseTelemetryPacket(text: String): TelemetryPacket {
     return TelemetryPacket(
         timestamp = json.optString("timestamp", ""),
         methanePpm = json.optDoubleOrNull("methane_ppm"),
+        methaneState = json.optIntOrNull("methane_state"),
+        methaneStatus = json.optString("methane_status", ""),
 
         windSpeedMps = json.optDoubleOrNull("wind_speed_mps"),
         windDirectionDeg = json.optDoubleOrNull("wind_direction_deg"),
@@ -2536,5 +2658,46 @@ fun batteryLabel(
         percent <= criticalPercent -> "Critical"
         percent <= lowPercent -> "Low"
         else -> "Good"
+    }
+}
+
+fun methaneStateShortLabel(state: Int): String {
+    return when (state) {
+        10 -> "Startup"
+        20 -> "Warm up"
+        30 -> "Set par"
+        35 -> "Final warm up"
+        37 -> "Housekeeping"
+        40 -> "Measurement"
+        50 -> "Housekeeping"
+        110 -> "Error"
+        else -> "Unknown"
+    }
+}
+
+fun methaneErrorLabel(status: String): String {
+    if (status == "ok") return "All good!"
+
+    val code = status
+        .removePrefix("error_")
+        .toIntOrNull()
+
+    return when (code) {
+        0 -> "No error"
+        1 -> "Laser temp. error 1"
+        2 -> "Laser temp. 2"
+        3 -> "Laser temp. 3"
+        4 -> "EEPROM error"
+        5 -> "Laser 1 vol. error"
+        6 -> "Laser 1 cur. error"
+        7 -> "Laser 2 vol. error"
+        8 -> "Laser 2 current error"
+        9 -> "Calibration error 1"
+        10 -> "Low power error"
+        11 -> "Centering error"
+        12 -> "Negative reading error"
+        13 -> "Calibration error 2"
+        14 -> "Flat ramp error"
+        else -> status.ifBlank { "--" }
     }
 }
