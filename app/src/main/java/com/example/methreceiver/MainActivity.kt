@@ -71,6 +71,7 @@ import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
+import androidx.compose.ui.viewinterop.AndroidView
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
@@ -108,6 +109,11 @@ import kotlin.math.cos
 import kotlin.math.min
 import kotlin.math.roundToInt
 import kotlin.math.sin
+import org.osmdroid.config.Configuration
+import org.osmdroid.tileprovider.tilesource.TileSourceFactory
+import org.osmdroid.util.GeoPoint
+import org.osmdroid.views.MapView
+import org.osmdroid.views.overlay.Marker
 
 class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -529,7 +535,7 @@ fun ReceiverDashboardApp() {
         ) {
             Box(
                 modifier = Modifier
-                    .weight(1f)
+                    .weight(1.35f)
                     .fillMaxHeight()
             ) {
                 GpsLocationPanel(packet = latestPacket)
@@ -537,7 +543,7 @@ fun ReceiverDashboardApp() {
 
             Box(
                 modifier = Modifier
-                    .weight(1.35f)
+                    .weight(1.00f)
                     .fillMaxHeight()
             ) {
                 RadioLinkPanel(rssiValues = rssiHistory.toList(), packet = latestPacket)
@@ -545,7 +551,7 @@ fun ReceiverDashboardApp() {
 
             Box(
                 modifier = Modifier
-                    .weight(0.8f)
+                    .weight(0.50f)
                     .fillMaxHeight()
             ) {
                 AlertsPanel(packet = latestPacket)
@@ -1143,7 +1149,7 @@ fun MetricGrid(
         )
 
         TripleMetricCard(
-            modifier = Modifier.weight(1f),
+            modifier = Modifier.weight(1.10f),
             title = "ENVIRONMENT",
             firstLabel = "TEMP.",
             firstValue = packet.temperatureC?.let { format1(cToF(it)) } ?: "--",
@@ -1163,7 +1169,7 @@ fun MetricGrid(
         )
 
         LoggingMetricCard(
-            modifier = Modifier.weight(0.85f),
+            modifier = Modifier.weight(0.75f),
             isLogging = isLogging,
             loggingTarget = loggingTarget,
             loggedRows = loggedRows,
@@ -1356,7 +1362,7 @@ fun TripleMetricCard(
     thirdIcon: androidx.compose.ui.graphics.vector.ImageVector,
     thirdColor: Color
 ) {
-    DashboardPanel(modifier = modifier, contentPadding = 12.dp) {
+    DashboardPanel(modifier = modifier, contentPadding = 16.dp) {
         Column(
             modifier = Modifier.fillMaxSize(),
             verticalArrangement = Arrangement.SpaceBetween
@@ -1373,7 +1379,7 @@ fun TripleMetricCard(
                 horizontalArrangement = Arrangement.spacedBy(6.dp)
             ) {
                 CompactMetricItem(
-                    modifier = Modifier.weight(1f),
+                    modifier = Modifier.weight(0.90f),
                     label = firstLabel,
                     value = firstValue,
                     unit = firstUnit,
@@ -1391,7 +1397,7 @@ fun TripleMetricCard(
                 )
 
                 CompactMetricItem(
-                    modifier = Modifier.weight(1f),
+                    modifier = Modifier.weight(1.10f),
                     label = thirdLabel,
                     value = thirdValue,
                     unit = thirdUnit,
@@ -2116,25 +2122,26 @@ fun GpsLocationPanel(packet: TelemetryPacket) {
 
     DashboardPanel(modifier = Modifier.fillMaxSize()) {
         Column(modifier = Modifier.fillMaxSize()) {
-            PanelTitle("GPS LOCATION", Icons.Outlined.LocationOn)
-            Spacer(modifier = Modifier.height(8.dp))
+            PanelTitle("GPS INFORMATION", Icons.Outlined.LocationOn)
+            Spacer(modifier = Modifier.height(4.dp))
 
             Row(
                 modifier = Modifier.fillMaxSize(),
-                horizontalArrangement = Arrangement.spacedBy(12.dp)
+                horizontalArrangement = Arrangement.spacedBy(12.dp),
+                verticalAlignment = Alignment.Top
             ) {
                 Column(
-                    modifier = Modifier.weight(1f),
+                    modifier = Modifier.weight(0.9f),
                     verticalArrangement = Arrangement.spacedBy(6.dp)
                 ) {
                     GpsStat("Status", if (packet.gpsStatus.isNotBlank()) packet.gpsStatus else "--", if (hasFix) Green else Orange)
-                    GpsStat("Latitude", packet.gpsLat?.let { format6(it) } ?: "--", Color.White)
-                    GpsStat("Longitude", packet.gpsLon?.let { format6(it) } ?: "--", Color.White)
+                    GpsStat("Latitude", packet.gpsLat?.let { format4(it) } ?: "--", Color.White)
+                    GpsStat("Longitude", packet.gpsLon?.let { format4(it) } ?: "--", Color.White)
                     GpsStat("Altitude", packet.gpsAltM?.let { "${format1(it)} m" } ?: "--", Blue)
                 }
 
                 Column(
-                    modifier = Modifier.weight(1f),
+                    modifier = Modifier.weight(0.8f),
                     verticalArrangement = Arrangement.spacedBy(6.dp)
                 ) {
                     GpsStat("Satellites", packet.gpsSatellites?.toString() ?: "--", Blue)
@@ -2142,11 +2149,89 @@ fun GpsLocationPanel(packet: TelemetryPacket) {
                     GpsStat("Speed", packet.gpsSpeedKnots?.let { "${format1(it)} kt" } ?: "--", TextSoft)
                     GpsStat("Course", packet.gpsCourseDeg?.let { "${it.roundToInt()}°" } ?: "--", TextSoft)
                 }
+
+                MiniMapBox(
+                    lat = packet.gpsLat,
+                    lon = packet.gpsLon,
+                    modifier = Modifier
+                        .weight(1.2f)
+                        .fillMaxHeight()
+                )
             }
         }
     }
 }
 
+fun format4(value: Double): String = String.format(Locale.US, "%.2f", value)
+
+@Composable
+fun MiniMapBox(
+    lat: Double?,
+    lon: Double?,
+    modifier: Modifier = Modifier
+) {
+    val context = LocalContext.current
+
+    Box(
+        modifier = modifier
+            .clip(RoundedCornerShape(16.dp))
+            .background(Color(0xFF16223A))
+            .border(1.dp, PanelBorder, RoundedCornerShape(16.dp))
+    ) {
+        if (lat != null && lon != null) {
+            AndroidView(
+                modifier = Modifier.fillMaxSize(),
+                factory = { ctx ->
+                    Configuration.getInstance().userAgentValue = ctx.packageName
+
+                    MapView(ctx).apply {
+                        setTileSource(TileSourceFactory.MAPNIK)
+                        setMultiTouchControls(false)
+                        controller.setZoom(15.0)
+
+                        val point = GeoPoint(lat, lon)
+                        controller.setCenter(point)
+
+                        overlays.clear()
+                        overlays.add(
+                            Marker(this).apply {
+                                position = point
+                                setAnchor(Marker.ANCHOR_CENTER, Marker.ANCHOR_BOTTOM)
+                                title = "GPS Position"
+                            }
+                        )
+                    }
+                },
+                update = { map ->
+                    val point = GeoPoint(lat, lon)
+                    map.controller.setCenter(point)
+
+                    map.overlays.clear()
+                    map.overlays.add(
+                        Marker(map).apply {
+                            position = point
+                            setAnchor(Marker.ANCHOR_CENTER, Marker.ANCHOR_BOTTOM)
+                            title = "GPS Position"
+                        }
+                    )
+                    map.invalidate()
+                }
+            )
+        } else {
+            Box(
+                modifier = Modifier.fillMaxSize(),
+                contentAlignment = Alignment.Center
+            ) {
+                Text(
+                    "NO GPS FIX",
+                    color = TextMuted,
+                    style = MaterialTheme.typography.bodySmall,
+                    fontWeight = FontWeight.Bold
+                )
+            }
+        }
+    }
+}
 @Composable
 fun GpsStat(label: String, value: String, valueColor: Color) {
     Row(
