@@ -235,10 +235,11 @@ fun ReceiverDashboardApp() {
     var latestPacket by remember { mutableStateOf(TelemetryPacket()) }
     var autoReconnect by remember { mutableStateOf(true) }
     var isConnecting by remember { mutableStateOf(false) }
+    var lastRadioCheckAt by remember { mutableStateOf("--") }
     var uiNowMillis by remember { mutableStateOf(System.currentTimeMillis()) }
     var showSettingsDialog by remember { mutableStateOf(false) }
-    var batteryMinVoltage by remember { mutableStateOf(5.0) }
-    var batteryMaxVoltage by remember { mutableStateOf(7.4) }
+    var batteryMinVoltage by remember { mutableStateOf(3.0) }
+    var batteryMaxVoltage by remember { mutableStateOf(5.0) }
     var batteryLowPercent by remember { mutableStateOf(25f) }
     var batteryCriticalPercent by remember { mutableStateOf(10f) }
     val methaneHistory = remember { mutableStateListOf<MethaneSample>() }
@@ -546,7 +547,18 @@ fun ReceiverDashboardApp() {
                     .weight(1.00f)
                     .fillMaxHeight()
             ) {
-                RadioLinkPanel(rssiValues = rssiHistory.toList(), packet = latestPacket)
+                RadioLinkPanel(
+                    rssiValues = rssiHistory.toList(),
+                    packet = latestPacket,
+                    lastRadioCheckAt = lastRadioCheckAt,
+                    onCheckRadio = {
+                        socketManager.sendRadioCheckRequest()
+                        lastRadioCheckAt = SimpleDateFormat(
+                            "hh:mm a",
+                            Locale.getDefault()
+                        ).format(Date())
+                    }
+                )
             }
 
             Box(
@@ -2245,7 +2257,8 @@ fun GpsStat(label: String, value: String, valueColor: Color) {
 }
 
 @Composable
-fun RadioLinkPanel(rssiValues: List<Int>, packet: TelemetryPacket) {
+fun RadioLinkPanel(rssiValues: List<Int>, packet: TelemetryPacket, lastRadioCheckAt: String,
+                   onCheckRadio: () -> Unit) {
     val displayValues = if (rssiValues.isEmpty()) {
         listOf(-78, -74, -70, -68, -72, -75, -80, -84, -88, -90, -86, -82)
     } else {
@@ -2254,8 +2267,25 @@ fun RadioLinkPanel(rssiValues: List<Int>, packet: TelemetryPacket) {
 
     DashboardPanel(modifier = Modifier.fillMaxSize()) {
         Column(modifier = Modifier.fillMaxSize()) {
-            PanelTitle("RADIO LINK (RSSI)", Icons.Outlined.Podcasts)
-            Spacer(modifier = Modifier.height(8.dp))
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                PanelTitle("RADIO LINK (RSSI)", Icons.Outlined.Podcasts)
+
+                Button(
+                    onClick = onCheckRadio,
+                    shape = RoundedCornerShape(10.dp),
+                    contentPadding = PaddingValues(horizontal = 10.dp, vertical = 4.dp),
+                    colors = ButtonDefaults.buttonColors(containerColor = Blue),
+                    modifier = Modifier.height(30.dp)
+                ) {
+                    Text("Check radio status", style = MaterialTheme.typography.bodySmall)
+                }
+            }
+
+            Spacer(modifier = Modifier.height(6.dp))
 
             Row(
                 modifier = Modifier.fillMaxSize(),
@@ -2267,6 +2297,12 @@ fun RadioLinkPanel(rssiValues: List<Int>, packet: TelemetryPacket) {
                     modifier = Modifier.width(155.dp),
                     verticalArrangement = Arrangement.spacedBy(8.dp)
                 ) {
+                    RadioStat(
+                        label = "Status at",
+                        value = lastRadioCheckAt,
+                        color = TextSoft
+                    )
+
                     RadioStat(
                         label = "Local RSSI",
                         value = packet.radioRssi?.let { "$it dBm" } ?: "--",
@@ -2486,6 +2522,10 @@ class TelemetryWebSocketClient(
         })
     }
 
+    fun sendRadioCheckRequest() {
+        webSocket?.send("""{"type":"check_radio"}""")
+    }
+
     fun disconnect() {
         webSocket?.close(1000, "Manual disconnect")
         webSocket = null
@@ -2700,31 +2740,6 @@ fun linkQualityColor(rssi: Int?, noise: Int?): Color {
         else -> Orange
     }
 }
-
-@Composable
-fun CompassLabel(
-    text: String,
-    alignment: Alignment,
-    top: androidx.compose.ui.unit.Dp = 0.dp,
-    bottom: androidx.compose.ui.unit.Dp = 0.dp,
-    start: androidx.compose.ui.unit.Dp = 0.dp,
-    end: androidx.compose.ui.unit.Dp = 0.dp
-) {
-    Box(
-        modifier = Modifier
-            .fillMaxSize()
-            .padding(start = start, end = end, top = top, bottom = bottom),
-        contentAlignment = alignment
-    ) {
-        Text(
-            text,
-            color = Color.White,
-            style = MaterialTheme.typography.headlineSmall,
-            fontWeight = FontWeight.SemiBold
-        )
-    }
-}
-
 
 fun cToF(celsius: Double): Double = (celsius * 9.0 / 5.0) + 32.0
 
