@@ -1,4 +1,6 @@
 package com.example.methreceiver
+import com.example.methreceiver.ui.common.*
+import com.example.methreceiver.model.SensITPacket
 
 import android.content.pm.ActivityInfo
 import android.os.Bundle
@@ -8,6 +10,7 @@ import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
 import android.net.Uri
+import androidx.compose.material.icons.outlined.Menu
 import android.provider.OpenableColumns
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
@@ -127,7 +130,7 @@ class MainActivity : ComponentActivity() {
                     modifier = Modifier.fillMaxSize(),
                     color = DashboardBg
                 ) {
-                    ReceiverDashboardApp()
+                    MethReceiverApp()
                 }
             }
         }
@@ -143,7 +146,7 @@ enum class TrendWindow(val label: String, val durationMillis: Long) {
     ONE_MIN("1M", 60_000L),
     FIVE_MIN("5M", 5 * 60_000L),
     FIFTEEN_MIN("15M", 15 * 60_000L),
-    ONE_HOUR("1H", 60 * 60_000L)
+    ONE_HOUR("H", 60 * 60_000L)
 }
 
 data class TelemetryPacket(
@@ -183,7 +186,7 @@ data class TelemetryPacket(
     val radioRemoteRssi: Int? = null,
     val radioNoise: Int? = null,
     val radioRemoteNoise: Int? = null,
-
+    val sensit: SensITPacket = SensITPacket(),
     val packetId: Long? = null
 )
 
@@ -214,173 +217,259 @@ data class CsvLoggerState(
     val currentFileName: String = ""
 )
 
-private const val DEFAULT_WS_URL = "ws://192.168.4.1:8765"
-private val DashboardBg = Color(0xFF050B18)
-private val HeaderBg = Color(0xFF091224)
-private val PanelBg = Color(0xFF0B1730)
-private val PanelBorder = Color(0xFF17325A)
-private val Cyan = Color(0xFF21C7FF)
-private val Green = Color(0xFF57E76D)
-private val Purple = Color(0xFF9F62FF)
-private val Orange = Color(0xFFFFB020)
-private val Blue = Color(0xFF5D8DFF)
-private val Yellow = Color(0xFFFFD23F)
-private val TextSoft = Color(0xFFA9B8D0)
-private val TextMuted = Color(0xFF7083A4)
-
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
-fun ReceiverDashboardApp() {
-    var connectionState by remember { mutableStateOf(ConnectionState()) }
-    var latestPacket by remember { mutableStateOf(TelemetryPacket()) }
-    var autoReconnect by remember { mutableStateOf(true) }
-    var isConnecting by remember { mutableStateOf(false) }
-    var lastRadioCheckAt by remember { mutableStateOf("--") }
-    var uiNowMillis by remember { mutableStateOf(System.currentTimeMillis()) }
-    var showSettingsDialog by remember { mutableStateOf(false) }
-    var batteryMinVoltage by remember { mutableStateOf(3.0) }
-    var batteryMaxVoltage by remember { mutableStateOf(5.0) }
-    var batteryLowPercent by remember { mutableStateOf(25f) }
-    var batteryCriticalPercent by remember { mutableStateOf(10f) }
-    val methaneHistory = remember { mutableStateListOf<MethaneSample>() }
-    var selectedTrendWindow by remember { mutableStateOf(TrendWindow.ONE_MIN) }
-    var loggerState by remember { mutableStateOf(CsvLoggerState(fileName = defaultCsvFileName())) }
-    var showLoggingSetup by remember { mutableStateOf(false) }
-    var loggingError by remember { mutableStateOf<String?>(null) }
-    var showLoggedFiles by remember { mutableStateOf(false) }
-    var showLogSavedMessage by remember { mutableStateOf(false) }
-    val loggedFiles = remember { mutableStateListOf<LoggedFileInfo>() }
-    var csvWriter by remember { mutableStateOf<OutputStreamWriter?>(null) }
-    val context = LocalContext.current
-    val rssiHistory = remember { mutableStateListOf<Int>() }
-    val packetArrivalTimes = remember { mutableStateListOf<Long>() }
-    val scope = rememberCoroutineScope()
+fun ReceiverDashboardContent(
+    latestPacket: TelemetryPacket,
+    connectionState: ConnectionState,
+    onReconnect: () -> Unit,
+    onCheckRadio: () -> Unit
+) {
+    var lastRadioCheckAt by remember {
+        mutableStateOf("--")
+    }
 
+    var uiNowMillis by remember {
+        mutableStateOf(System.currentTimeMillis())
+    }
+
+    val methaneHistory = remember {
+        mutableStateListOf<MethaneSample>()
+    }
+
+    var selectedTrendWindow by remember {
+        mutableStateOf(TrendWindow.ONE_MIN)
+    }
+
+    val rssiHistory = remember {
+        mutableStateListOf<Int>()
+    }
+
+    /*
+     * Dashboard CSV logger state.
+     */
+    var loggerState by remember {
+        mutableStateOf(
+            CsvLoggerState(
+                fileName = defaultCsvFileName()
+            )
+        )
+    }
+
+    var showLoggingSetup by remember {
+        mutableStateOf(false)
+    }
+
+    var loggingError by remember {
+        mutableStateOf<String?>(null)
+    }
+
+    var showLoggedFiles by remember {
+        mutableStateOf(false)
+    }
+
+    var showLogSavedMessage by remember {
+        mutableStateOf(false)
+    }
+
+    val loggedFiles = remember {
+        mutableStateListOf<LoggedFileInfo>()
+    }
+
+    var csvWriter by remember {
+        mutableStateOf<OutputStreamWriter?>(null)
+    }
+
+    val context = LocalContext.current
+
+    /*
+     * Update the stale-data timer every second.
+     */
     LaunchedEffect(Unit) {
         while (true) {
             uiNowMillis = System.currentTimeMillis()
-            delay(1000)
+            delay(1_000L)
         }
     }
 
     val telemetryStale =
         connectionState.connected &&
                 connectionState.lastPacketMillis > 0L &&
-                uiNowMillis - connectionState.lastPacketMillis > 5000L
+                uiNowMillis - connectionState.lastPacketMillis > 5_000L
 
-    val socketManager = remember {
-        TelemetryWebSocketClient(
-            onConnecting = {
-                isConnecting = true
-                connectionState = connectionState.copy(status = "Connecting...")
-            },
-            onConnected = {
-                isConnecting = false
-                connectionState = connectionState.copy(connected = true, status = "Connected")
-            },
-            onDisconnected = { reason ->
-                isConnecting = false
-                connectionState = connectionState.copy(connected = false, status = reason)
-            },
-            onPacket = { packet ->
-                latestPacket = packet
+    /*
+     * Process each newly received packet for:
+     * - chart history
+     * - RSSI history
+     * - CSV logging
+     *
+     * The WebSocket itself lives in AppRoot.kt.
+     */
+    LaunchedEffect(
+        latestPacket.timestamp,
+        latestPacket.packetId
+    ) {
+        if (
+            latestPacket.timestamp.isBlank() &&
+            latestPacket.packetId == null
+        ) {
+            return@LaunchedEffect
+        }
 
-                if (loggerState.isLogging && csvWriter != null) {
-                    csvWriter?.write(csvRow(packet))
-                    csvWriter?.flush()
-                    loggerState = loggerState.copy(rowCount = loggerState.rowCount + 1)
-                }
-
-                val now = System.currentTimeMillis()
-                packetArrivalTimes.add(now)
-                while (packetArrivalTimes.isNotEmpty() && now - packetArrivalTimes.first() > 5000) {
-                    packetArrivalTimes.removeAt(0)
-                }
-
-                val rate = if (packetArrivalTimes.size >= 2) {
-                    packetArrivalTimes.size / 5.0
-                } else {
-                    0.0
-                }
-
-                connectionState = connectionState.copy(
-                    connected = true,
-                    status = "Streaming",
-                    lastMessageAt = nowString(),
-                    packetsPerSecond = rate,
-                    lastPacketMillis = now
+        if (loggerState.isLogging && csvWriter != null) {
+            try {
+                csvWriter?.write(
+                    csvRow(latestPacket)
                 )
 
-                packet.methanePpm?.let {
-                    val now = System.currentTimeMillis()
-                    methaneHistory.add(MethaneSample(now, it))
+                csvWriter?.flush()
 
-                    val cutoff = now - TrendWindow.ONE_HOUR.durationMillis
-                    methaneHistory.removeAll { sample -> sample.timeMillis < cutoff }
+                loggerState = loggerState.copy(
+                    rowCount = loggerState.rowCount + 1
+                )
+            } catch (exception: Exception) {
+                loggingError =
+                    exception.message ?: "Failed to write CSV row."
+
+                runCatching {
+                    csvWriter?.close()
                 }
 
-                packet.radioRssi?.let {
-                    rssiHistory.add(it)
-                    if (rssiHistory.size > 12) rssiHistory.removeAt(0)
-                }
+                csvWriter = null
+
+                loggerState = loggerState.copy(
+                    isLogging = false
+                )
             }
-        )
-    }
+        }
 
-    val folderPickerLauncher = rememberLauncherForActivityResult(
-        contract = ActivityResultContracts.OpenDocumentTree()
-    ) { uri ->
-        if (uri != null) {
-            context.contentResolver.takePersistableUriPermission(
-                uri,
-                android.content.Intent.FLAG_GRANT_READ_URI_PERMISSION or
-                        android.content.Intent.FLAG_GRANT_WRITE_URI_PERMISSION
+        latestPacket.methanePpm?.let { methanePpm ->
+            val now = System.currentTimeMillis()
+
+            methaneHistory.add(
+                MethaneSample(
+                    timeMillis = now,
+                    ppm = methanePpm
+                )
             )
 
-            loggerState = loggerState.copy(
-                folderUri = uri,
-                isConfigured = loggerState.fileName.isNotBlank()
-            )
+            val cutoff =
+                now - TrendWindow.ONE_HOUR.durationMillis
+
+            methaneHistory.removeAll { sample ->
+                sample.timeMillis < cutoff
+            }
+        }
+
+        latestPacket.radioRssi?.let { rssi ->
+            rssiHistory.add(rssi)
+
+            if (rssiHistory.size > 12) {
+                rssiHistory.removeAt(0)
+            }
         }
     }
+
+    val folderPickerLauncher =
+        rememberLauncherForActivityResult(
+            contract = ActivityResultContracts.OpenDocumentTree()
+        ) { uri ->
+            if (uri != null) {
+                try {
+                    context.contentResolver
+                        .takePersistableUriPermission(
+                            uri,
+                            Intent.FLAG_GRANT_READ_URI_PERMISSION or
+                                    Intent.FLAG_GRANT_WRITE_URI_PERMISSION
+                        )
+                } catch (_: SecurityException) {
+                    // Some document providers grant access without allowing
+                    // persisted permissions. The selected URI may still work.
+                }
+
+                loggerState = loggerState.copy(
+                    folderUri = uri,
+                    isConfigured =
+                        loggerState.fileName.isNotBlank()
+                )
+            }
+        }
 
     fun startLogging() {
         try {
             val folderUri = loggerState.folderUri
+
             if (folderUri == null) {
-                loggingError = "No logging folder selected."
+                loggingError =
+                    "No logging folder selected."
+
                 return
             }
 
-            var fileName = loggerState.fileName.ifBlank { defaultCsvFileName() }
-            if (!fileName.endsWith(".csv", ignoreCase = true)) {
+            var fileName =
+                loggerState.fileName.ifBlank {
+                    defaultCsvFileName()
+                }
+
+            if (
+                !fileName.endsWith(
+                    suffix = ".csv",
+                    ignoreCase = true
+                )
+            ) {
                 fileName += ".csv"
             }
 
-            val pickedDir = DocumentFile.fromTreeUri(context, folderUri)
+            val pickedDirectory =
+                DocumentFile.fromTreeUri(
+                    context,
+                    folderUri
+                )
 
-            if (pickedDir == null || !pickedDir.canWrite()) {
-                loggingError = "Cannot access selected folder."
+            if (
+                pickedDirectory == null ||
+                !pickedDirectory.canWrite()
+            ) {
+                loggingError =
+                    "Cannot access the selected folder."
+
                 return
             }
 
-            pickedDir.findFile(fileName)?.delete()
+            pickedDirectory
+                .findFile(fileName)
+                ?.delete()
 
-            val newFile = pickedDir.createFile("text/csv", fileName)
+            val newFile =
+                pickedDirectory.createFile(
+                    "text/csv",
+                    fileName
+                )
 
             if (newFile == null) {
-                loggingError = "Failed to create CSV file in selected folder."
+                loggingError =
+                    "Failed to create the CSV file."
+
                 return
             }
 
-            val outputStream = context.contentResolver.openOutputStream(newFile.uri, "w")
+            val outputStream =
+                context.contentResolver
+                    .openOutputStream(
+                        newFile.uri,
+                        "w"
+                    )
 
             if (outputStream == null) {
-                loggingError = "Could not open CSV file for writing."
+                loggingError =
+                    "Could not open the CSV file."
+
                 return
             }
 
-            val writer = OutputStreamWriter(outputStream)
+            val writer =
+                OutputStreamWriter(outputStream)
+
             writer.write(csvHeader())
             writer.flush()
 
@@ -392,10 +481,19 @@ fun ReceiverDashboardApp() {
                 currentFileUri = newFile.uri,
                 currentFileName = fileName
             )
-        } catch (e: Exception) {
-            loggingError = e.message ?: "Failed to start logging."
+        } catch (exception: Exception) {
+            loggingError =
+                exception.message ?: "Failed to start logging."
+
+            runCatching {
+                csvWriter?.close()
+            }
+
             csvWriter = null
-            loggerState = loggerState.copy(isLogging = false)
+
+            loggerState = loggerState.copy(
+                isLogging = false
+            )
         }
     }
 
@@ -403,29 +501,35 @@ fun ReceiverDashboardApp() {
         try {
             csvWriter?.flush()
             csvWriter?.close()
-        } catch (e: Exception) {
-            loggingError = e.message ?: "Failed to close CSV file."
+        } catch (exception: Exception) {
+            loggingError =
+                exception.message ?: "Failed to close the CSV file."
         }
 
         csvWriter = null
 
         val uri = loggerState.currentFileUri
         val fileName = loggerState.currentFileName
-        val finalRows = loggerState.rowCount
+        val finalRowCount = loggerState.rowCount
 
-        if (uri != null && fileName.isNotBlank()) {
+        if (
+            uri != null &&
+            fileName.isNotBlank()
+        ) {
             loggedFiles.add(
                 LoggedFileInfo(
                     fileName = fileName,
                     uri = uri,
-                    rowCount = finalRows,
-                    sizeBytes = getUriSizeBytes(context, uri),
+                    rowCount = finalRowCount,
+                    sizeBytes = getUriSizeBytes(
+                        context,
+                        uri
+                    ),
                     savedAt = nowString()
                 )
             )
         }
 
-        // Reset logging setup after each completed log
         loggerState = CsvLoggerState(
             fileName = defaultCsvFileName()
         )
@@ -433,45 +537,30 @@ fun ReceiverDashboardApp() {
         showLogSavedMessage = true
     }
 
-
+    /*
+     * Close a logging stream safely if the Dashboard page is removed from
+     * composition while logging.
+     */
     DisposableEffect(Unit) {
-        socketManager.connect(DEFAULT_WS_URL)
-        onDispose { socketManager.disconnect() }
-    }
-
-    LaunchedEffect(autoReconnect, connectionState.connected, isConnecting) {
-        if (autoReconnect && !connectionState.connected && !isConnecting) {
-            delay(3000)
-            socketManager.connect(DEFAULT_WS_URL)
+        onDispose {
+            runCatching {
+                csvWriter?.flush()
+                csvWriter?.close()
+            }
         }
     }
 
+    /*
+     * Dashboard content only.
+     * Header/background/system-bar padding are owned by AppRoot.kt.
+     */
     Column(
-        modifier = Modifier
-            .fillMaxSize()
-            .background(DashboardBg)
-            .systemBarsPadding()
-            .padding(horizontal = 12.dp, vertical = 8.dp),
+        modifier = Modifier.fillMaxSize(),
         verticalArrangement = Arrangement.spacedBy(10.dp)
     ) {
-        HeaderRow(
-            state = connectionState,
-            packet = latestPacket,
-            isConnecting = isConnecting,
-            batteryMinVoltage = batteryMinVoltage,
-            batteryMaxVoltage = batteryMaxVoltage,
-            batteryLowPercent = batteryLowPercent,
-            batteryCriticalPercent = batteryCriticalPercent,
-            onSettingsClicked = { showSettingsDialog = true }
-        )
-
         ConnectionIssueBanner(
             state = connectionState,
-            onReconnectClicked = {
-                scope.launch(Dispatchers.IO) {
-                    socketManager.connect(DEFAULT_WS_URL)
-                }
-            }
+            onReconnectClicked = onReconnect
         )
 
         TelemetryStaleBanner(
@@ -482,22 +571,50 @@ fun ReceiverDashboardApp() {
         MetricGrid(
             packet = latestPacket,
             isLogging = loggerState.isLogging,
-            loggingTarget = if (loggerState.isConfigured) "CSV Ready" else "Not configured",
+
+            loggingTarget =
+                if (loggerState.isConfigured) {
+                    "CSV Ready"
+                } else {
+                    "Not configured"
+                },
+
             loggedRows = loggerState.rowCount,
-            canStartLogging = loggerState.isConfigured && !loggerState.isLogging,
-            canStopLogging = loggerState.isLogging,
-            canViewData = loggedFiles.isNotEmpty(),
-            onSetupLogging = { showLoggingSetup = true },
-            onStartLogging = { startLogging() },
-            onStopLogging = { stopLogging() },
-            onViewData = { showLoggedFiles = true }
+
+            canStartLogging =
+                loggerState.isConfigured &&
+                        !loggerState.isLogging,
+
+            canStopLogging =
+                loggerState.isLogging,
+
+            canViewData =
+                loggedFiles.isNotEmpty(),
+
+            onSetupLogging = {
+                showLoggingSetup = true
+            },
+
+            onStartLogging = {
+                startLogging()
+            },
+
+            onStopLogging = {
+                stopLogging()
+            },
+
+            onViewData = {
+                showLoggedFiles = true
+            }
         )
 
         Row(
             modifier = Modifier
                 .fillMaxWidth()
                 .weight(1f),
-            horizontalArrangement = Arrangement.spacedBy(10.dp)
+
+            horizontalArrangement =
+                Arrangement.spacedBy(10.dp)
         ) {
             Box(
                 modifier = Modifier
@@ -507,7 +624,10 @@ fun ReceiverDashboardApp() {
                 MethaneTrendPanel(
                     samples = methaneHistory.toList(),
                     selectedWindow = selectedTrendWindow,
-                    onWindowSelected = { selectedTrendWindow = it }
+
+                    onWindowSelected = {
+                        selectedTrendWindow = it
+                    }
                 )
             }
 
@@ -516,7 +636,9 @@ fun ReceiverDashboardApp() {
                     .weight(0.75f)
                     .fillMaxHeight()
             ) {
-                WindDirectionPanel(packet = latestPacket)
+                WindDirectionPanel(
+                    packet = latestPacket
+                )
             }
 
             Box(
@@ -524,7 +646,10 @@ fun ReceiverDashboardApp() {
                     .weight(0.62f)
                     .fillMaxHeight()
             ) {
-                SystemStatusPanel(packet = latestPacket, state = connectionState)
+                SystemStatusPanel(
+                    packet = latestPacket,
+                    state = connectionState
+                )
             }
         }
 
@@ -532,31 +657,38 @@ fun ReceiverDashboardApp() {
             modifier = Modifier
                 .fillMaxWidth()
                 .weight(0.82f),
-            horizontalArrangement = Arrangement.spacedBy(10.dp)
+
+            horizontalArrangement =
+                Arrangement.spacedBy(10.dp)
         ) {
             Box(
                 modifier = Modifier
                     .weight(1.35f)
                     .fillMaxHeight()
             ) {
-                GpsLocationPanel(packet = latestPacket)
+                GpsLocationPanel(
+                    packet = latestPacket
+                )
             }
 
             Box(
                 modifier = Modifier
-                    .weight(1.00f)
+                    .weight(1f)
                     .fillMaxHeight()
             ) {
                 RadioLinkPanel(
                     rssiValues = rssiHistory.toList(),
                     packet = latestPacket,
                     lastRadioCheckAt = lastRadioCheckAt,
+
                     onCheckRadio = {
-                        socketManager.sendRadioCheckRequest()
-                        lastRadioCheckAt = SimpleDateFormat(
-                            "hh:mm a",
-                            Locale.getDefault()
-                        ).format(Date())
+                        onCheckRadio()
+
+                        lastRadioCheckAt =
+                            SimpleDateFormat(
+                                "hh:mm a",
+                                Locale.getDefault()
+                            ).format(Date())
                     }
                 )
             }
@@ -566,48 +698,67 @@ fun ReceiverDashboardApp() {
                     .weight(0.50f)
                     .fillMaxHeight()
             ) {
-                AlertsPanel(packet = latestPacket)
+                AlertsPanel(
+                    packet = latestPacket
+                )
             }
         }
-    }
-
-    if (showSettingsDialog) {
-        SettingsDialog(
-            batteryMinVoltage = batteryMinVoltage,
-            batteryMaxVoltage = batteryMaxVoltage,
-            batteryLowPercent = batteryLowPercent,
-            batteryCriticalPercent = batteryCriticalPercent,
-            onBatteryMinVoltageChanged = { batteryMinVoltage = it },
-            onBatteryMaxVoltageChanged = { batteryMaxVoltage = it },
-            onBatteryLowPercentChanged = { batteryLowPercent = it },
-            onBatteryCriticalPercentChanged = { batteryCriticalPercent = it },
-            onDismiss = { showSettingsDialog = false }
-        )
     }
 
     if (showLoggingSetup) {
         LoggingSetupDialog(
             fileName = loggerState.fileName,
-            folderSelected = loggerState.folderUri != null,
-            onFileNameChanged = { loggerState = loggerState.copy(fileName = it) },
-            onChooseFolder = { folderPickerLauncher.launch(null) },
+            folderSelected =
+                loggerState.folderUri != null,
+
+            onFileNameChanged = {
+                loggerState = loggerState.copy(
+                    fileName = it
+                )
+            },
+
+            onChooseFolder = {
+                folderPickerLauncher.launch(null)
+            },
+
             onSave = {
                 loggerState = loggerState.copy(
-                    isConfigured = loggerState.folderUri != null && loggerState.fileName.isNotBlank()
+                    isConfigured =
+                        loggerState.folderUri != null &&
+                                loggerState.fileName.isNotBlank()
                 )
+
                 showLoggingSetup = false
             },
-            onDismiss = { showLoggingSetup = false }
+
+            onDismiss = {
+                showLoggingSetup = false
+            }
         )
     }
 
     if (showLogSavedMessage) {
         AlertDialog(
-            onDismissRequest = { showLogSavedMessage = false },
-            title = { Text("Logging stopped") },
-            text = { Text("Data stored in selected location.") },
+            onDismissRequest = {
+                showLogSavedMessage = false
+            },
+
+            title = {
+                Text("Logging stopped")
+            },
+
+            text = {
+                Text(
+                    "Data stored in the selected location."
+                )
+            },
+
             confirmButton = {
-                TextButton(onClick = { showLogSavedMessage = false }) {
+                TextButton(
+                    onClick = {
+                        showLogSavedMessage = false
+                    }
+                ) {
                     Text("OK")
                 }
             }
@@ -616,38 +767,73 @@ fun ReceiverDashboardApp() {
 
     if (showLoggedFiles) {
         AlertDialog(
-            onDismissRequest = { showLoggedFiles = false },
-            title = { Text("Logged CSV Files") },
+            onDismissRequest = {
+                showLoggedFiles = false
+            },
+
+            title = {
+                Text("Logged CSV Files")
+            },
+
             text = {
-                Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                Column(
+                    verticalArrangement =
+                        Arrangement.spacedBy(8.dp)
+                ) {
                     if (loggedFiles.isEmpty()) {
                         Text("No logged files yet.")
                     } else {
                         loggedFiles.forEach { file ->
-                            Text(file.fileName)
                             Text(
-                                "Rows: ${file.rowCount}   Size: ${file.sizeBytes} bytes   Saved: ${file.savedAt}",
+                                text = file.fileName,
+                                fontWeight = FontWeight.Bold
+                            )
+
+                            Text(
+                                text =
+                                    "Rows: ${file.rowCount}   " +
+                                            "Size: ${file.sizeBytes} bytes   " +
+                                            "Saved: ${file.savedAt}",
+
                                 color = TextSoft
                             )
                         }
                     }
                 }
             },
+
             confirmButton = {
-                TextButton(onClick = { showLoggedFiles = false }) {
+                TextButton(
+                    onClick = {
+                        showLoggedFiles = false
+                    }
+                ) {
                     Text("Close")
                 }
             }
         )
     }
 
-    if (loggingError != null) {
+    loggingError?.let { errorMessage ->
         AlertDialog(
-            onDismissRequest = { loggingError = null },
-            title = { Text("Logging error") },
-            text = { Text(loggingError ?: "Unknown error") },
+            onDismissRequest = {
+                loggingError = null
+            },
+
+            title = {
+                Text("Logging error")
+            },
+
+            text = {
+                Text(errorMessage)
+            },
+
             confirmButton = {
-                TextButton(onClick = { loggingError = null }) {
+                TextButton(
+                    onClick = {
+                        loggingError = null
+                    }
+                ) {
                     Text("OK")
                 }
             }
@@ -964,6 +1150,7 @@ fun HeaderRow(
     batteryMaxVoltage: Double,
     batteryLowPercent: Float,
     batteryCriticalPercent: Float,
+    onMenuClicked: () -> Unit,
     onSettingsClicked: () -> Unit
 ) {
     val localTime = rememberLocalTime()
@@ -979,6 +1166,17 @@ fun HeaderRow(
             verticalAlignment = Alignment.CenterVertically
         ) {
             Row(verticalAlignment = Alignment.CenterVertically) {
+                Icon(
+                    imageVector = Icons.Outlined.Menu,
+                    contentDescription = "Open navigation",
+                    tint = Color.White,
+                    modifier = Modifier
+                        .size(30.dp)
+                        .clickable { onMenuClicked() }
+                )
+
+                Spacer(modifier = Modifier.width(12.dp))
+
                 LogoTitleBlock(logoRes = R.drawable.usu)
                 Spacer(modifier = Modifier.width(18.dp))
                 StatusBadge("Wi-Fi", if (state.connected) "Connected" else "Waiting", Icons.Outlined.Router)
@@ -2487,18 +2685,33 @@ class TelemetryWebSocketClient(
                 }
             }
 
-            override fun onMessage(webSocket: WebSocket, text: String) {
-                runCatching { parseTelemetryPacket(text) }
-                    .onSuccess { packet ->
-                        mainHandler.post {
-                            onPacket(packet)
-                        }
+            override fun onMessage(
+                webSocket: WebSocket,
+                text: String
+            ) {
+                val json = runCatching {
+                    JSONObject(text)
+                }.getOrElse {
+                    return
+                }
+
+                // Ignore command/status messages here.
+                // The next regular sensor packet contains the updated radio values.
+                if (json.optString("type").isNotBlank()) {
+                    return
+                }
+
+                runCatching {
+                    parseTelemetryPacket(text)
+                }.onSuccess { packet ->
+                    mainHandler.post {
+                        onPacket(packet)
                     }
-                    .onFailure {
-                        mainHandler.post {
-                            onDisconnected("Bad packet")
-                        }
+                }.onFailure {
+                    mainHandler.post {
+                        onDisconnected("Bad packet")
                     }
+                }
             }
 
             override fun onClosed(webSocket: WebSocket, code: Int, reason: String) {
@@ -2572,18 +2785,107 @@ fun parseTelemetryPacket(text: String): TelemetryPacket {
         radioNoise = json.optIntOrNull("radio_noise"),
         radioRemoteNoise = json.optIntOrNull("radio_remote_noise"),
 
+        sensit = parseSensITPacket(json),
+
         packetId = json.optLongOrNull("packet_id")
     )
 }
 
+fun parseSensITPacket(json: JSONObject): SensITPacket {
+    val extConnection =
+        json.optIntOrNull("sensit_ext_connection")
+
+    return SensITPacket(
+        concentration =
+            json.optDoubleOrNull("sensit_concentration"),
+
+        errorId =
+            json.optIntOrNull("sensit_error_id"),
+
+        errorName =
+            json.optString("sensit_error_name", ""),
+
+        activeState =
+            json.optIntOrNull("sensit_active_state"),
+
+        activeStateName =
+            json.optString("sensit_active_state_name", ""),
+
+        counterM =
+            json.optIntOrNull("sensit_counter_m"),
+
+        extConnection =
+            extConnection,
+
+        extConnected =
+            json.optBooleanOrNull("sensit_ext_connected")
+                ?: extConnection?.let { it == 1 },
+
+        concentrationRaw =
+            json.optDoubleOrNull("sensit_concentration_raw"),
+
+        concentrationCal =
+            json.optDoubleOrNull("sensit_concentration_cal"),
+
+        concentrationTemp =
+            json.optDoubleOrNull("sensit_concentration_temp"),
+
+        phdPower =
+            json.optDoubleOrNull("sensit_phd_power"),
+
+        sensitivityLevel =
+            json.optIntOrNull("sensit_sensitivity_level"),
+
+        sensitivityLabel =
+            json.optString("sensit_sensitivity_label", ""),
+
+        temperature =
+            json.optDoubleOrNull("sensit_temperature"),
+
+        laserTemperature =
+            json.optDoubleOrNull("sensit_laser_temperature"),
+
+        laserVoltage =
+            json.optDoubleOrNull("sensit_laser_voltage"),
+
+        laserCurrent =
+            json.optDoubleOrNull("sensit_laser_current"),
+
+        bit =
+            json.optIntOrNull("sensit_bit"),
+
+        lastTimeAcq =
+            json.optDoubleOrNull("sensit_last_time_acq")
+    )
+}
+
 fun JSONObject.optDoubleOrNull(name: String): Double? =
-    if (has(name) && !isNull(name)) optDouble(name) else null
+    if (has(name) && !isNull(name)) {
+        optDouble(name)
+    } else {
+        null
+    }
+
+fun JSONObject.optBooleanOrNull(name: String): Boolean? =
+    if (has(name) && !isNull(name)) {
+        optBoolean(name)
+    } else {
+        null
+    }
 
 fun JSONObject.optIntOrNull(name: String): Int? =
-    if (has(name) && !isNull(name)) optInt(name) else null
+    if (has(name) && !isNull(name)) {
+        optInt(name)
+    } else {
+        null
+    }
 
 fun JSONObject.optLongOrNull(name: String): Long? =
-    if (has(name) && !isNull(name)) optLong(name) else null
+    if (has(name) && !isNull(name)) {
+        optLong(name)
+    } else {
+        null
+    }
 
 fun methaneAlert(value: Double?): String {
     if (value == null) return "No active telemetry"
