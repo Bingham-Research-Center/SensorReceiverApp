@@ -155,6 +155,8 @@ data class TelemetryPacket(
     val methaneState: Int? = null,
     val methaneStatus: String = "",
 
+    val windStatus: String = "",
+    val windSource: String = "",
     val windSpeedMps: Double? = null,
     val windDirectionDeg: Double? = null,
     val windSpeed2dMps: Double? = null,
@@ -167,6 +169,24 @@ data class TelemetryPacket(
     val pitchDeg: Double? = null,
     val rollDeg: Double? = null,
     val magneticHeadingDeg: Double? = null,
+
+    // Wind postprocessing transmitted by MethStation.
+    // Raw TriSonica wind fields above remain unchanged.
+    val windProcessedStatus: String = "not_provided",
+    val windProcessedFrame: String = "unknown",
+    val windProcessedOrientuv: String = "",
+    val windProcessedHeadingDeg: Double? = null,
+    val windProcessedTiltApplied: Boolean? = null,
+    val windRelativeEastMps: Double? = null,
+    val windRelativeNorthMps: Double? = null,
+    val windRelativeUpMps: Double? = null,
+    val windAmbientEastMps: Double? = null,
+    val windAmbientNorthMps: Double? = null,
+    val windAmbientUpMps: Double? = null,
+    val windAmbientSpeed2dMps: Double? = null,
+    val windAmbientDirectionFromDeg: Double? = null,
+    val windMotionCompensation: String = "none",
+    val windGpsReason: String = "not_provided",
 
     val gpsStatus: String = "",
     val gpsLat: Double? = null,
@@ -189,6 +209,88 @@ data class TelemetryPacket(
     val sensit: SensITPacket = SensITPacket(),
     val packetId: Long? = null
 )
+
+
+// The dashboard shows ambient wind only if horizontal GPS motion correction
+// was actually applied in a true-north frame.  Orientation-only wind is
+// relative to the moving drone, NOT the ambient atmosphere.
+data class DisplayWind(
+    val speedMps: Double?,
+    val directionFromDeg: Double?,
+    val speedLabel: String,
+    val referenceLabel: String,
+    val isAmbient: Boolean
+)
+
+fun directionFromEnu(east: Double?, north: Double?): Double? {
+    if (east == null || north == null) return null
+    if (!east.isFinite() || !north.isFinite()) return null
+    if (Math.hypot(east, north) < 0.2) return null // calm: no useful direction
+    return (Math.toDegrees(Math.atan2(-east, -north)) + 360.0) % 360.0
+}
+
+fun displayWind(packet: TelemetryPacket): DisplayWind {
+    val compensated = packet.windProcessedStatus in setOf(
+        "gps_horizontal_compensated",
+        "gps_horizontal_compensated_assuming_level"
+    ) && packet.windProcessedFrame == "ENU_true"
+
+    if (compensated && packet.windAmbientEastMps != null &&
+        packet.windAmbientNorthMps != null && packet.windAmbientSpeed2dMps != null
+    ) {
+        val reference = if (packet.windProcessedTiltApplied == false) {
+            "Ambient estimate / true north (level assumed)"
+        } else {
+            "Ambient estimate / true north (GPS corrected)"
+        }
+        return DisplayWind(
+            speedMps = packet.windAmbientSpeed2dMps,
+            directionFromDeg = packet.windAmbientDirectionFromDeg,
+            speedLabel = "AMBIENT WIND",
+            referenceLabel = reference,
+            isAmbient = true
+        )
+    }
+
+    val relativeEast = packet.windRelativeEastMps
+    val relativeNorth = packet.windRelativeNorthMps
+    val available = packet.windProcessedStatus in setOf(
+        "orientation_only", "magnetic_frame_only",
+        "gps_horizontal_compensated", "gps_horizontal_compensated_assuming_level"
+    )
+    if (available && relativeEast != null && relativeNorth != null) {
+        val northReference = if (packet.windProcessedFrame == "ENU_true") {
+            "true north"
+        } else {
+            "magnetic north"
+        }
+        return DisplayWind(
+            speedMps = Math.hypot(relativeEast, relativeNorth),
+            directionFromDeg = directionFromEnu(relativeEast, relativeNorth),
+            speedLabel = "RELATIVE WIND",
+            referenceLabel = "Relative to drone / $northReference (NOT ambient)",
+            isAmbient = false
+        )
+    }
+
+    if (packet.windStatus.equals("ok", ignoreCase = true)) {
+        return DisplayWind(
+            speedMps = packet.windSpeedMps,
+            directionFromDeg = null, // RAW direction uses sensor N, not north
+            speedLabel = "RAW SENSOR WIND",
+            referenceLabel = "Uncorrected sensor wind / no geographic direction",
+            isAmbient = false
+        )
+    }
+
+    return DisplayWind(
+        speedMps = null,
+        directionFromDeg = null,
+        speedLabel = "WIND UNAVAILABLE",
+        referenceLabel = "No valid wind measurement",
+        isAmbient = false
+    )
+}
 
 data class ConnectionState(
     val connected: Boolean = false,
@@ -1185,7 +1287,7 @@ fun HeaderRow(
                 Spacer(modifier = Modifier.width(10.dp))
                 StatusBadge("WebSocket",if (state.connected) "Streaming" else shortConnectionStatus(state.status), Icons.Outlined.Sensors)
                 Spacer(modifier = Modifier.width(10.dp))
-                StatusBadge("GPS", gpsStatusText(state.connected), Icons.Outlined.LocationOn)
+                StatusBadge("GPS", gpsStatusText(packet.gpsStatus), Icons.Outlined.LocationOn)
             }
 
             Row(verticalAlignment = Alignment.CenterVertically) {
@@ -1337,6 +1439,8 @@ fun MetricGrid(
     onStopLogging: () -> Unit,
     onViewData: () -> Unit
 ) {
+    val windView = displayWind(packet)
+
     Row(
         modifier = Modifier
             .fillMaxWidth()
@@ -1351,8 +1455,8 @@ fun MetricGrid(
             leftUnit = "ppm",
             leftIcon = Icons.Outlined.WarningAmber,
             leftColor = Green,
-            rightLabel = "WIND SPEED",
-            rightValue = packet.windSpeedMps?.let { format1(it) } ?: "--",
+            rightLabel = windView.speedLabel,
+            rightValue = windView.speedMps?.let { format1(it) } ?: "--",
             rightUnit = "m/s",
             rightIcon = Icons.Outlined.Air,
             rightColor = Cyan
@@ -1474,6 +1578,21 @@ fun DeviceStatusCard(
         "Health: Good"
     }
 
+    val windConnectionText = when {
+        packet.windStatus.equals("ok", ignoreCase = true) ->
+            "State: Streaming (${packet.windSource.ifBlank { "Pico" }})"
+        packet.windStatus.isBlank() -> "State: Unknown"
+        else -> "State: ${packet.windStatus}"
+    }
+    val windHealthText = when {
+        !packet.windStatus.equals("ok", ignoreCase = true) -> "Wind unavailable"
+        packet.windProcessedStatus.startsWith("gps_horizontal_compensated") ->
+            "GPS motion corrected"
+        packet.windProcessedStatus in setOf("orientation_only", "magnetic_frame_only") ->
+            "Orientation corrected only"
+        else -> "Raw wind / check processing"
+    }
+
     val methaneStatusText = when {
         packet.methaneStatus.isBlank() -> "--"
         else -> methaneErrorLabel(packet.methaneStatus)
@@ -1534,15 +1653,15 @@ fun DeviceStatusCard(
                     )
 
                     Text(
-                        "State: --",
-                        color = TextSoft,
+                        windConnectionText,
+                        color = if (packet.windStatus == "ok") Green else Orange,
                         style = MaterialTheme.typography.bodySmall,
                         fontWeight = FontWeight.SemiBold
                     )
 
                     Text(
-                        "Health: --",
-                        color = TextSoft,
+                        windHealthText,
+                        color = if (packet.windStatus == "ok") Green else TextSoft,
                         style = MaterialTheme.typography.bodySmall,
                         fontWeight = FontWeight.SemiBold
                     )
@@ -2045,10 +2164,14 @@ fun MethaneLineChart(
 
 @Composable
 fun WindDirectionPanel(packet: TelemetryPacket) {
+    val windView = displayWind(packet)
+    val displayedDirection = windView.directionFromDeg
     DashboardPanel(modifier = Modifier.fillMaxSize()) {
         Column(modifier = Modifier.fillMaxSize()) {
             PanelTitle("WIND DIRECTION", Icons.Outlined.Explore)
-            Spacer(modifier = Modifier.height(6.dp))
+            Text(windView.referenceLabel, color = TextSoft,
+                style = MaterialTheme.typography.bodySmall)
+            Spacer(modifier = Modifier.height(4.dp))
 
             Row(
                 modifier = Modifier.fillMaxSize(),
@@ -2068,7 +2191,7 @@ fun WindDirectionPanel(packet: TelemetryPacket) {
                     )
 
                     Text(
-                        compassLongLabel(packet.windDirectionDeg),
+                        compassLongLabel(displayedDirection),
                         color = Color.White,
                         style = MaterialTheme.typography.titleMedium,
                         fontWeight = FontWeight.Bold
@@ -2081,14 +2204,14 @@ fun WindDirectionPanel(packet: TelemetryPacket) {
                         horizontalArrangement = Arrangement.spacedBy(8.dp)
                     ) {
                         Text(
-                            packet.windDirectionDeg?.let { "${it.roundToInt()}°" } ?: "--",
+                            displayedDirection?.let { "${it.roundToInt()}°" } ?: "--",
                             color = Purple,
                             style = MaterialTheme.typography.headlineMedium,
                             fontWeight = FontWeight.Bold
                         )
 
                         Text(
-                            compassLabel(packet.windDirectionDeg),
+                            compassLabel(displayedDirection),
                             color = Purple,
                             style = MaterialTheme.typography.titleLarge,
                             fontWeight = FontWeight.Bold,
@@ -2103,7 +2226,7 @@ fun WindDirectionPanel(packet: TelemetryPacket) {
                         .fillMaxHeight(),
                     contentAlignment = Alignment.Center
                 ) {
-                    CompassGauge(packet.windDirectionDeg)
+                    CompassGauge(displayedDirection)
                 }
             }
         }
@@ -2328,7 +2451,7 @@ fun BatteryRow(label: String, percent: Int?) {
 
 @Composable
 fun GpsLocationPanel(packet: TelemetryPacket) {
-    val hasFix = packet.gpsStatus == "fix" || packet.gpsStatus == "ok" || packet.gpsLat != null
+    val hasFix = packet.gpsStatus.lowercase() in setOf("fix", "ok", "2d_fix", "3d_fix")
 
     DashboardPanel(modifier = Modifier.fillMaxSize()) {
         Column(modifier = Modifier.fillMaxSize()) {
@@ -2361,8 +2484,8 @@ fun GpsLocationPanel(packet: TelemetryPacket) {
                 }
 
                 MiniMapBox(
-                    lat = packet.gpsLat,
-                    lon = packet.gpsLon,
+                    lat = if (hasFix) packet.gpsLat else null,
+                    lon = if (hasFix) packet.gpsLon else null,
                     modifier = Modifier
                         .weight(1.2f)
                         .fillMaxHeight()
@@ -2575,7 +2698,8 @@ fun BarChart(values: List<Int>, modifier: Modifier = Modifier) {
 @Composable
 fun AlertsPanel(packet: TelemetryPacket) {
     val methaneWarning = (packet.methanePpm ?: 0.0) >= 150.0
-    val windWarning = (packet.windSpeedMps ?: 0.0) >= 25.0
+    val windView = displayWind(packet)
+    val windWarning = (windView.speedMps ?: 0.0) >= 25.0
 
     val alerts = buildList {
         if (methaneWarning) {
@@ -2627,7 +2751,9 @@ fun AlertsPanel(packet: TelemetryPacket) {
 
                 if (windWarning) {
                     WarningAlertRow(
-                        text = "Strong Wind (${format1(packet.windSpeedMps ?: 0.0)} m/s)",
+                        text = (if (windView.isAmbient) "Strong Ambient Wind"
+                        else "High Sensor-Relative Wind") +
+                                " (${format1(windView.speedMps ?: 0.0)} m/s)",
                         color = Yellow
                     )
                 }
@@ -2753,6 +2879,8 @@ fun parseTelemetryPacket(text: String): TelemetryPacket {
         methaneState = json.optIntOrNull("methane_state"),
         methaneStatus = json.optString("methane_status", ""),
 
+        windStatus = json.optString("wind_status", ""),
+        windSource = json.optString("wind_source", ""),
         windSpeedMps = json.optDoubleOrNull("wind_speed_mps"),
         windDirectionDeg = json.optDoubleOrNull("wind_direction_deg"),
         windSpeed2dMps = json.optDoubleOrNull("wind_speed_2d_mps"),
@@ -2765,6 +2893,23 @@ fun parseTelemetryPacket(text: String): TelemetryPacket {
         pitchDeg = json.optDoubleOrNull("pitch_deg"),
         rollDeg = json.optDoubleOrNull("roll_deg"),
         magneticHeadingDeg = json.optDoubleOrNull("magnetic_heading_deg"),
+
+        // WebSocket JSON keys supplied by receiver Pi flatten_packet().
+        windProcessedStatus = json.optString("wind_processed_status", "not_provided"),
+        windProcessedFrame = json.optString("wind_processed_frame", "unknown"),
+        windProcessedOrientuv = json.optString("wind_processed_orientuv", ""),
+        windProcessedHeadingDeg = json.optDoubleOrNull("wind_processed_heading_deg"),
+        windProcessedTiltApplied = json.optBooleanOrNull("wind_processed_tilt_applied"),
+        windRelativeEastMps = json.optDoubleOrNull("wind_relative_east_mps"),
+        windRelativeNorthMps = json.optDoubleOrNull("wind_relative_north_mps"),
+        windRelativeUpMps = json.optDoubleOrNull("wind_relative_up_mps"),
+        windAmbientEastMps = json.optDoubleOrNull("wind_ambient_east_mps"),
+        windAmbientNorthMps = json.optDoubleOrNull("wind_ambient_north_mps"),
+        windAmbientUpMps = json.optDoubleOrNull("wind_ambient_up_mps"),
+        windAmbientSpeed2dMps = json.optDoubleOrNull("wind_ambient_speed_2d_mps"),
+        windAmbientDirectionFromDeg = json.optDoubleOrNull("wind_ambient_direction_from_deg"),
+        windMotionCompensation = json.optString("wind_motion_compensation", "none"),
+        windGpsReason = json.optString("wind_gps_reason", "not_provided"),
 
         gpsStatus = json.optString("gps_status", ""),
         gpsLat = json.optDoubleOrNull("gps_lat"),
@@ -2916,6 +3061,12 @@ fun signalQuality(rssi: Int?): String {
     }
 }
 
+fun gpsStatusText(gpsStatus: String): String =
+    if (gpsStatus.lowercase() in setOf("fix", "ok", "2d_fix", "3d_fix"))
+        "Locked" else "Searching"
+
+// Backward-compatible overload for other existing Android source files.
+// Use the String status overload above for the dashboard GPS badge.
 fun gpsStatusText(connected: Boolean): String = if (connected) "Locked" else "Searching"
 
 fun compassLabel(deg: Double?): String {
@@ -3061,22 +3212,53 @@ fun defaultCsvFileName(): String {
 }
 
 fun csvHeader(): String {
-    return "timestamp_iso,gps_lat_deg,gps_lon_deg,ch4_ppm,wind_u_mps,wind_v_mps,wind_w_mps,wind_total_mps,wind_direction_deg\n"
+    // Keep original nine columns in place; append fields for research use.
+    return listOf(
+        "timestamp_iso", "gps_lat_deg", "gps_lon_deg", "ch4_ppm",
+        "wind_u_mps", "wind_v_mps", "wind_w_mps", "wind_total_mps",
+        "wind_direction_deg",
+        "wind_status", "wind_source", "pitch_deg", "roll_deg",
+        "magnetic_heading_deg", "gps_status", "gps_satellites",
+        "gps_hdop", "gps_speed_knots", "gps_course_deg", "gps_timestamp_utc",
+        "wind_processed_status", "wind_processed_frame",
+        "wind_processed_orientuv", "wind_processed_heading_deg",
+        "wind_processed_tilt_applied", "wind_relative_east_mps",
+        "wind_relative_north_mps", "wind_relative_up_mps",
+        "wind_ambient_east_mps", "wind_ambient_north_mps",
+        "wind_ambient_up_mps", "wind_ambient_speed_2d_mps",
+        "wind_ambient_direction_from_deg", "wind_motion_compensation",
+        "wind_gps_reason",
+        "temperature_c", "pressure_hpa", "humidity_percent"
+    ).joinToString(",") + "\n"
 }
 
 fun csvRow(packet: TelemetryPacket): String {
-    fun d(value: Double?): String = value?.let { String.format(Locale.US, "%.6f", it) } ?: ""
-
+    fun d(value: Double?): String = value?.let {
+        if (it.isFinite()) String.format(Locale.US, "%.6f", it) else ""
+    } ?: ""
+    fun s(value: String?): String {
+        val v = value.orEmpty()
+        return if (v.any { it == ',' || it == '\"' || it == '\n' }) {
+            "\"" + v.replace("\"", "\"\"") + "\""
+        } else v
+    }
     return listOf(
-        packet.timestamp,
-        d(packet.gpsLat),
-        d(packet.gpsLon),
-        d(packet.methanePpm),
-        d(packet.windUMps),
-        d(packet.windVMps),
-        d(packet.windWMps),
-        d(packet.windSpeedMps),
-        d(packet.windDirectionDeg)
+        s(packet.timestamp), d(packet.gpsLat), d(packet.gpsLon),
+        d(packet.methanePpm), d(packet.windUMps), d(packet.windVMps),
+        d(packet.windWMps), d(packet.windSpeedMps), d(packet.windDirectionDeg),
+        s(packet.windStatus), s(packet.windSource), d(packet.pitchDeg),
+        d(packet.rollDeg), d(packet.magneticHeadingDeg), s(packet.gpsStatus),
+        packet.gpsSatellites?.toString() ?: "", d(packet.gpsHdop),
+        d(packet.gpsSpeedKnots), d(packet.gpsCourseDeg), s(packet.gpsTimestampUtc),
+        s(packet.windProcessedStatus), s(packet.windProcessedFrame),
+        s(packet.windProcessedOrientuv), d(packet.windProcessedHeadingDeg),
+        packet.windProcessedTiltApplied?.toString() ?: "",
+        d(packet.windRelativeEastMps), d(packet.windRelativeNorthMps),
+        d(packet.windRelativeUpMps), d(packet.windAmbientEastMps),
+        d(packet.windAmbientNorthMps), d(packet.windAmbientUpMps),
+        d(packet.windAmbientSpeed2dMps), d(packet.windAmbientDirectionFromDeg),
+        s(packet.windMotionCompensation), s(packet.windGpsReason),
+        d(packet.temperatureC), d(packet.pressureHpa), d(packet.humidityPercent)
     ).joinToString(",") + "\n"
 }
 
