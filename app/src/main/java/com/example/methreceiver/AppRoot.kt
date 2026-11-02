@@ -16,7 +16,8 @@ private const val WS_URL = "ws://192.168.4.1:8765"
 
 enum class AppPage {
     Dashboard,
-    SensIT
+    SensIT,
+    TrisonicaMini
 }
 
 @Composable
@@ -219,6 +220,15 @@ fun MethReceiverApp() {
                         }
                     }
                 )
+
+                NavigationDrawerItem(
+                    label = { Text("TrisonicaMini") },
+                    selected = page == AppPage.TrisonicaMini,
+                    onClick = {
+                        page = AppPage.TrisonicaMini
+                        scope.launch { drawerState.close() }
+                    }
+                )
             }
         }
     ) {
@@ -268,19 +278,27 @@ fun MethReceiverApp() {
                     .fillMaxWidth()
                     .weight(1f)
             ) {
+                // TrisonicaMini: keep the existing Dashboard CSV session alive across pages.
+                KeepTelemetryPageAlive(visible = page == AppPage.Dashboard) {
+                    ReceiverDashboardContent(
+                        latestPacket = latestPacket,
+                        connectionState = connectionState,
+                        onReconnect = {
+                            socketManager.connect(WS_URL)
+                        },
+                        onCheckRadio = {
+                            socketManager.sendRadioCheckRequest()
+                        }
+                    )
+                }
+
                 when (page) {
-                    AppPage.Dashboard -> {
-                        ReceiverDashboardContent(
-                            latestPacket = latestPacket,
-                            connectionState = connectionState,
+                    AppPage.Dashboard -> Unit
 
-                            onReconnect = {
-                                socketManager.connect(WS_URL)
-                            },
-
-                            onCheckRadio = {
-                                socketManager.sendRadioCheckRequest()
-                            }
+                    AppPage.TrisonicaMini -> {
+                        TrisonicaMiniScreen(
+                            packet = latestPacket,
+                            connectionState = connectionState
                         )
                     }
 

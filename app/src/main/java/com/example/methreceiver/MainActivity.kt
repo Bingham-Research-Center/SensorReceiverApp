@@ -3350,3 +3350,712 @@ fun methaneErrorLabel(status: String): String {
         else -> status.ifBlank { "--" }
     }
 }
+
+// -----------------------------------------------------------------------------
+// TrisonicaMini diagnostics page.
+// Uses the shared TelemetryPacket from AppRoot.kt; it never opens another socket.
+// Raw sensor axes, orientation-only ENU, and GPS-corrected ambient wind are kept
+// separate. No missing measurement is replaced by a fabricated zero.
+// -----------------------------------------------------------------------------
+
+private const val TRISONICA_CALM_MPS = 0.2
+private const val TRISONICA_STALE_MS = 5_000L
+
+private fun trisonicaFinite(value: Double?): Double? =
+    value?.takeIf { it.isFinite() }
+
+private fun trisonicaNonNegative(value: Double?): Double? =
+    trisonicaFinite(value)?.takeIf { it >= 0.0 }
+
+private fun trisonicaBearing(value: Double?): Double? =
+    trisonicaFinite(value)?.let { ((it % 360.0) + 360.0) % 360.0 }
+
+private fun trisonicaNumber(value: Double?, decimals: Int = 2): String =
+    trisonicaFinite(value)?.let { String.format(Locale.US, "% .${decimals}f", it).trim() }
+        ?: "--"
+
+private fun trisonicaAngle(value: Double?, signed: Boolean = false): String =
+    trisonicaFinite(value)?.let {
+        String.format(Locale.US, if (signed) "%+.1f\u00b0" else "%.1f\u00b0", it)
+    } ?: "--"
+
+private fun trisonicaHorizontal(east: Double?, north: Double?): Double? {
+    val e = trisonicaFinite(east) ?: return null
+    val n = trisonicaFinite(north) ?: return null
+    return trisonicaFinite(Math.hypot(e, n))
+}
+
+private fun trisonicaMagnitude(x: Double?, y: Double?, z: Double?): Double? {
+    val a = trisonicaFinite(x) ?: return null
+    val b = trisonicaFinite(y) ?: return null
+    val c = trisonicaFinite(z) ?: return null
+    return trisonicaFinite(Math.hypot(Math.hypot(a, b), c))
+}
+
+private fun trisonicaDirectionFrom(east: Double?, north: Double?): Double? {
+    val speed = trisonicaHorizontal(east, north) ?: return null
+    if (speed < TRISONICA_CALM_MPS) return null
+    return trisonicaBearing(Math.toDegrees(Math.atan2(-east!!, -north!!)))
+}
+
+private fun trisonicaCompassPoint(degrees: Double?): String {
+    val bearing = trisonicaBearing(degrees) ?: return "--"
+    val labels = listOf("N", "NE", "E", "SE", "S", "SW", "W", "NW")
+    return labels[((bearing / 45.0).roundToInt()) % labels.size]
+}
+
+private data class TrisonicaCorrectedWind(
+    val available: Boolean = false,
+    val isAmbient: Boolean = false,
+    val title: String = "CORRECTED WIND UNAVAILABLE",
+    val reference: String = "No usable corrected ENU vector in this packet",
+    val horizontalMps: Double? = null,
+    val directionFromDeg: Double? = null,
+    val eastMps: Double? = null,
+    val northMps: Double? = null,
+    val upMps: Double? = null,
+    val note: String = "Raw wind is never substituted into this corrected panel."
+)
+
+private fun trisonicaCorrectedWind(packet: TelemetryPacket): TrisonicaCorrectedWind {
+    if (!packet.windStatus.equals("ok", ignoreCase = true)) {
+        return TrisonicaCorrectedWind(
+            reference = "Wind sensor is not reporting OK",
+            note = "Reported fields remain visible in diagnostics; correction is not treated as valid."
+        )
+    }
+    val status = packet.windProcessedStatus
+    val frame = packet.windProcessedFrame
+    val trueNorth = frame == "ENU_true"
+    val magneticNorth = frame == "ENU_magnetic"
+    val gpsCorrected = status in setOf(
+        "gps_horizontal_compensated", "gps_horizontal_compensated_assuming_level"
+    )
+    val relativeUsable = status in setOf(
+        "orientation_only", "magnetic_frame_only",
+        "gps_horizontal_compensated", "gps_horizontal_compensated_assuming_level"
+    )
+
+    // GPS speed/course correct horizontal motion only. Vertical ENU is reported,
+    // not advertised as vertically motion-compensated atmospheric wind.
+    val ambientHorizontal = trisonicaHorizontal(
+        packet.windAmbientEastMps, packet.windAmbientNorthMps
+    )
+    if (gpsCorrected && trueNorth && ambientHorizontal != null) {
+        val levelAssumed = status == "gps_horizontal_compensated_assuming_level" ||
+                packet.windProcessedTiltApplied == false
+        val direction = if (ambientHorizontal < TRISONICA_CALM_MPS) null else
+            trisonicaBearing(packet.windAmbientDirectionFromDeg)
+                ?: trisonicaDirectionFrom(packet.windAmbientEastMps, packet.windAmbientNorthMps)
+        return TrisonicaCorrectedWind(
+            available = true,
+            isAmbient = true,
+            title = "AMBIENT WIND ESTIMATE",
+            reference = "True north / GPS horizontal motion corrected",
+            horizontalMps = ambientHorizontal,
+            directionFromDeg = direction,
+            eastMps = trisonicaFinite(packet.windAmbientEastMps),
+            northMps = trisonicaFinite(packet.windAmbientNorthMps),
+            upMps = trisonicaFinite(packet.windAmbientUpMps),
+            note = (if (levelAssumed) "Level orientation assumed. " else "") +
+                    "Only horizontal motion correction is established by this status."
+        )
+    }
+
+    val relativeHorizontal = trisonicaHorizontal(
+        packet.windRelativeEastMps, packet.windRelativeNorthMps
+    )
+    // A magnetic-only status explicitly identifies its north reference, even
+    // when an older transmitter omitted the optional frame text.
+    val knownRelativeFrame = trueNorth || magneticNorth || status == "magnetic_frame_only"
+    if (relativeUsable && knownRelativeFrame && relativeHorizontal != null) {
+        val useTrueNorth = trueNorth && status != "magnetic_frame_only"
+        return TrisonicaCorrectedWind(
+            available = true,
+            title = "ORIENTATION-CORRECTED WIND",
+            reference = if (useTrueNorth) "True north / relative to moving sensor"
+            else "Magnetic north / relative to moving sensor",
+            horizontalMps = relativeHorizontal,
+            directionFromDeg = trisonicaDirectionFrom(
+                packet.windRelativeEastMps, packet.windRelativeNorthMps
+            ),
+            eastMps = trisonicaFinite(packet.windRelativeEastMps),
+            northMps = trisonicaFinite(packet.windRelativeNorthMps),
+            upMps = trisonicaFinite(packet.windRelativeUpMps),
+            note = "NOT ambient wind: sensor/drone motion is still present in this vector."
+        )
+    }
+    return TrisonicaCorrectedWind(
+        reference = "Status: ${status.ifBlank { "not provided" }} / frame: ${frame.ifBlank { "unknown" }}"
+    )
+}
+
+/**
+ * Keep Dashboard's existing logging session composed while another page is
+ * visible. Hidden content is not measured, placed, drawn, or hit-tested.
+ * Its LaunchedEffect continues receiving the shared packet. This does not make
+ * logging a background service; closing the Activity still closes the writer.
+ */
+@Composable
+fun KeepTelemetryPageAlive(
+    visible: Boolean,
+    content: @Composable () -> Unit
+) {
+    androidx.compose.ui.layout.Layout(content = content) { measurables, constraints ->
+        if (visible) {
+            val placeables = measurables.map { it.measure(constraints) }
+            val width = placeables.maxOfOrNull { it.width } ?: constraints.minWidth
+            val height = placeables.maxOfOrNull { it.height } ?: constraints.minHeight
+            layout(width, height) {
+                placeables.forEach { it.placeRelative(0, 0) }
+            }
+        } else {
+            layout(constraints.minWidth, constraints.minHeight) { }
+        }
+    }
+}
+
+/** Content only: AppRoot.kt supplies the shared header, drawer and WebSocket. */
+@Composable
+fun TrisonicaMiniScreen(
+    packet: TelemetryPacket,
+    connectionState: ConnectionState
+) {
+    var nowMillis by remember { mutableStateOf(System.currentTimeMillis()) }
+    LaunchedEffect(Unit) {
+        while (true) {
+            nowMillis = System.currentTimeMillis()
+            delay(1_000L)
+        }
+    }
+    val ageMillis = connectionState.lastPacketMillis.takeIf { it > 0L }
+        ?.let { (nowMillis - it).coerceAtLeast(0L) }
+    val stale = ageMillis != null && ageMillis > TRISONICA_STALE_MS
+    val live = connectionState.connected && ageMillis != null && !stale
+    val corrected = trisonicaCorrectedWind(packet)
+
+    androidx.compose.foundation.layout.BoxWithConstraints(Modifier.fillMaxSize()) {
+        val wide = maxWidth >= 760.dp
+        androidx.compose.foundation.lazy.LazyColumn(
+            modifier = Modifier.fillMaxSize(),
+            verticalArrangement = Arrangement.spacedBy(10.dp),
+            contentPadding = PaddingValues(bottom = 16.dp)
+        ) {
+            item(key = "trisonica_status") {
+                TrisonicaStatusPanel(packet, connectionState, ageMillis, live, stale)
+            }
+            item(key = "trisonica_attitude") {
+                if (wide) {
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.spacedBy(10.dp)
+                    ) {
+                        TrisonicaTiltCard("PITCH", packet.pitchDeg, true,
+                            Modifier.weight(1f).height(244.dp))
+                        TrisonicaTiltCard("ROLL", packet.rollDeg, false,
+                            Modifier.weight(1f).height(244.dp))
+                        TrisonicaHeadingCard(packet.magneticHeadingDeg,
+                            Modifier.weight(1f).height(244.dp))
+                    }
+                } else {
+                    Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                        Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+                            TrisonicaTiltCard("PITCH", packet.pitchDeg, true,
+                                Modifier.weight(1f).height(244.dp))
+                            TrisonicaTiltCard("ROLL", packet.rollDeg, false,
+                                Modifier.weight(1f).height(244.dp))
+                        }
+                        TrisonicaHeadingCard(packet.magneticHeadingDeg,
+                            Modifier.fillMaxWidth().height(244.dp))
+                    }
+                }
+            }
+            item(key = "trisonica_environment") {
+                TrisonicaEnvironmentPanel(packet, wide)
+            }
+            item(key = "trisonica_directions") {
+                if (wide) {
+                    Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+                        TrisonicaRawWindPanel(packet, Modifier.weight(1f))
+                        TrisonicaCorrectedWindPanel(corrected, Modifier.weight(1f))
+                    }
+                } else {
+                    Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                        TrisonicaRawWindPanel(packet, Modifier.fillMaxWidth())
+                        TrisonicaCorrectedWindPanel(corrected, Modifier.fillMaxWidth())
+                    }
+                }
+            }
+            item(key = "trisonica_vectors") {
+                if (wide) {
+                    Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+                        TrisonicaVectorPanel("RAW SENSOR VECTOR", "Unrotated sensor axes",
+                            listOf("U" to packet.windUMps, "V" to packet.windVMps, "W" to packet.windWMps),
+                            Cyan, Modifier.weight(1f))
+                        TrisonicaVectorPanel("RELATIVE ENU VECTOR", "Orientation corrected; NOT ambient",
+                            listOf("East" to packet.windRelativeEastMps, "North" to packet.windRelativeNorthMps,
+                                "Up" to packet.windRelativeUpMps),
+                            Yellow, Modifier.weight(1f))
+                        TrisonicaVectorPanel("AMBIENT ENU FIELDS", "Reported fields; validity follows status",
+                            listOf("East" to packet.windAmbientEastMps, "North" to packet.windAmbientNorthMps,
+                                "Up" to packet.windAmbientUpMps),
+                            Green, Modifier.weight(1f))
+                    }
+                } else {
+                    Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                        TrisonicaVectorPanel("RAW SENSOR VECTOR", "Unrotated sensor axes",
+                            listOf("U" to packet.windUMps, "V" to packet.windVMps, "W" to packet.windWMps),
+                            Cyan, Modifier.fillMaxWidth())
+                        TrisonicaVectorPanel("RELATIVE ENU VECTOR", "Orientation corrected; NOT ambient",
+                            listOf("East" to packet.windRelativeEastMps, "North" to packet.windRelativeNorthMps,
+                                "Up" to packet.windRelativeUpMps),
+                            Yellow, Modifier.fillMaxWidth())
+                        TrisonicaVectorPanel("AMBIENT ENU FIELDS", "Reported fields; validity follows status",
+                            listOf("East" to packet.windAmbientEastMps, "North" to packet.windAmbientNorthMps,
+                                "Up" to packet.windAmbientUpMps),
+                            Green, Modifier.fillMaxWidth())
+                    }
+                }
+            }
+            item(key = "trisonica_processing") {
+                TrisonicaProcessingPanel(packet, corrected)
+            }
+            item(key = "trisonica_gps_context") {
+                TrisonicaGpsContextPanel(packet)
+            }
+        }
+    }
+}
+
+@Composable
+private fun TrisonicaStatusPanel(
+    packet: TelemetryPacket,
+    state: ConnectionState,
+    ageMillis: Long?,
+    live: Boolean,
+    stale: Boolean
+) {
+    val status = when {
+        !state.connected -> "DISCONNECTED"
+        ageMillis == null -> "WAITING FOR TELEMETRY"
+        stale -> "STALE TELEMETRY"
+        !packet.windStatus.equals("ok", ignoreCase = true) -> "WIND NOT READY"
+        else -> "LIVE"
+    }
+    val statusColor = if (live && packet.windStatus.equals("ok", ignoreCase = true)) Green else Orange
+    DashboardPanel(modifier = Modifier.fillMaxWidth(), contentPadding = 14.dp) {
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.SpaceBetween,
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            Column(modifier = Modifier.weight(1f)) {
+                Text("TrisonicaMini", color = Color.White,
+                    style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.Bold)
+                Text("Attitude / environment / raw and corrected wind",
+                    color = TextSoft, style = MaterialTheme.typography.bodySmall)
+            }
+            Spacer(Modifier.width(12.dp))
+            Text(status, color = statusColor, fontWeight = FontWeight.Bold,
+                style = MaterialTheme.typography.labelLarge)
+        }
+        Spacer(Modifier.height(8.dp))
+        Text(
+            "Source: ${packet.windSource.ifBlank { "--" }}    " +
+                    "Wind status: ${packet.windStatus.ifBlank { "--" }}    " +
+                    "Packet: ${packet.packetId?.toString() ?: "--"}    " +
+                    "Age: ${ageMillis?.let { "${trisonicaNumber(it / 1000.0, 1)} s" } ?: "--"}",
+            color = TextSoft, style = MaterialTheme.typography.bodySmall
+        )
+        Text("Packet timestamp: ${packet.timestamp.ifBlank { "--" }}",
+            color = TextSoft, style = MaterialTheme.typography.bodySmall)
+        if (!live) {
+            Text("Values below are last received values, not confirmed live measurements.",
+                color = Orange, style = MaterialTheme.typography.bodySmall)
+        }
+        Text("Age measures the shared telemetry packet, not a separate wind-sensor timestamp.",
+            color = TextMuted, style = MaterialTheme.typography.bodySmall)
+    }
+}
+
+@Composable
+private fun TrisonicaTiltCard(
+    title: String,
+    degrees: Double?,
+    sideView: Boolean,
+    modifier: Modifier
+) {
+    val value = trisonicaFinite(degrees)
+    val accent = if (sideView) Cyan else Purple
+    DashboardPanel(modifier = modifier, contentPadding = 12.dp) {
+        Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
+            Text(title, color = TextSoft, fontWeight = FontWeight.Bold,
+                style = MaterialTheme.typography.labelLarge)
+            Text(trisonicaAngle(value, signed = true), color = accent,
+                fontWeight = FontWeight.Bold, style = MaterialTheme.typography.titleLarge)
+        }
+        Box(Modifier.weight(1f).fillMaxWidth(), contentAlignment = Alignment.Center) {
+            TrisonicaTiltGauge(value, sideView, accent, Modifier.fillMaxSize())
+            if (value == null) Text("NO DATA", color = TextMuted, fontWeight = FontWeight.Bold)
+        }
+        Text(if (sideView) "Side-view tilt / signed sensor pitch" else "Front-view tilt / signed sensor roll",
+            color = TextSoft, style = MaterialTheme.typography.bodySmall)
+        Text("Mounting and sensor sign convention apply.", color = TextMuted,
+            style = MaterialTheme.typography.bodySmall)
+    }
+}
+
+@Composable
+private fun TrisonicaTiltGauge(
+    degrees: Double?,
+    sideView: Boolean,
+    accent: Color,
+    modifier: Modifier
+) {
+    Canvas(modifier) {
+        val center = Offset(size.width / 2f, size.height / 2f)
+        val radius = min(size.width * 0.34f, size.height * 0.42f)
+        if (radius <= 0f) return@Canvas
+        drawCircle(PanelBg, radius, center)
+        drawCircle(PanelBorder, radius, center, style = Stroke(2.dp.toPx()))
+        drawLine(TextMuted.copy(alpha = 0.45f),
+            Offset(center.x - radius, center.y), Offset(center.x + radius, center.y), 1.dp.toPx())
+        drawLine(TextMuted.copy(alpha = 0.25f),
+            Offset(center.x, center.y - radius), Offset(center.x, center.y + radius), 1.dp.toPx())
+        for (tick in 0 until 24) {
+            val angle = Math.toRadians(tick * 15.0)
+            val outer = Offset(center.x + cos(angle).toFloat() * radius,
+                center.y + sin(angle).toFloat() * radius)
+            val innerRadius = radius * if (tick % 6 == 0) 0.82f else 0.91f
+            val inner = Offset(center.x + cos(angle).toFloat() * innerRadius,
+                center.y + sin(angle).toFloat() * innerRadius)
+            drawLine(TextMuted, inner, outer, if (tick % 6 == 0) 2.dp.toPx() else 1.dp.toPx())
+        }
+        if (degrees == null) return@Canvas
+        // A signed-angle glyph, not an inferred aircraft attitude. Positive is
+        // drawn counterclockwise from the horizontal; raw numeric sign is kept.
+        val angle = Math.toRadians(-(degrees % 360.0))
+        val dx = cos(angle).toFloat()
+        val dy = sin(angle).toFloat()
+        val left = Offset(center.x - dx * radius * 0.72f, center.y - dy * radius * 0.72f)
+        val right = Offset(center.x + dx * radius * 0.72f, center.y + dy * radius * 0.72f)
+        drawLine(accent, left, right, 5.dp.toPx(), StrokeCap.Round)
+        drawCircle(Color.White, 5.dp.toPx(), center)
+        if (sideView) {
+            val tip = Offset(center.x + dx * radius * 0.87f, center.y + dy * radius * 0.87f)
+            val arrow = androidx.compose.ui.graphics.Path().apply {
+                moveTo(tip.x, tip.y)
+                lineTo(right.x - dy * 7.dp.toPx(), right.y + dx * 7.dp.toPx())
+                lineTo(right.x + dy * 7.dp.toPx(), right.y - dx * 7.dp.toPx())
+                close()
+            }
+            drawPath(arrow, accent)
+        } else {
+            drawCircle(accent, 6.dp.toPx(), left, style = Stroke(2.dp.toPx()))
+            drawCircle(accent, 6.dp.toPx(), right, style = Stroke(2.dp.toPx()))
+        }
+    }
+}
+
+@Composable
+private fun TrisonicaHeadingCard(degrees: Double?, modifier: Modifier) {
+    val bearing = trisonicaBearing(degrees)
+    DashboardPanel(modifier = modifier, contentPadding = 12.dp) {
+        Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
+            Text("MAGNETIC HEADING", modifier = Modifier.weight(1f),
+                color = TextSoft, fontWeight = FontWeight.Bold,
+                style = MaterialTheme.typography.labelLarge)
+            Text(trisonicaAngle(bearing), color = Yellow, fontWeight = FontWeight.Bold,
+                style = MaterialTheme.typography.titleLarge)
+        }
+        Box(Modifier.weight(1f).fillMaxWidth(), contentAlignment = Alignment.Center) {
+            TrisonicaBearingGauge(bearing, false, Yellow, Modifier.fillMaxSize())
+            if (bearing == null) Text("NO DATA", color = TextMuted, fontWeight = FontWeight.Bold)
+        }
+        Text("Sensor heading / magnetic north", color = TextSoft,
+            style = MaterialTheme.typography.bodySmall)
+        Text("Pointer shows heading, not wind direction.", color = TextMuted,
+            style = MaterialTheme.typography.bodySmall)
+    }
+}
+
+@Composable
+private fun TrisonicaBearingGauge(
+    degrees: Double?,
+    sensorReference: Boolean,
+    accent: Color,
+    modifier: Modifier
+) {
+    val bearing = trisonicaBearing(degrees)
+    val paint = remember {
+        android.graphics.Paint(android.graphics.Paint.ANTI_ALIAS_FLAG).apply {
+            textAlign = android.graphics.Paint.Align.CENTER
+        }
+    }
+    Canvas(modifier) {
+        val center = Offset(size.width / 2f, size.height / 2f)
+        val radius = min(size.width, size.height) * 0.35f
+        if (radius <= 0f) return@Canvas
+        drawCircle(PanelBorder.copy(alpha = 0.20f), radius, center)
+        drawCircle(PanelBorder, radius, center, style = Stroke(2.dp.toPx()))
+        drawCircle(PanelBorder.copy(alpha = 0.45f), radius * 0.55f, center,
+            style = Stroke(1.dp.toPx()))
+        for (tick in 0 until 36) {
+            val angle = Math.toRadians(tick * 10.0 - 90.0)
+            val major = tick % 9 == 0
+            val inner = radius * if (major) 0.82f else 0.93f
+            drawLine(if (major) TextSoft else PanelBorder,
+                Offset(center.x + cos(angle).toFloat() * inner, center.y + sin(angle).toFloat() * inner),
+                Offset(center.x + cos(angle).toFloat() * radius, center.y + sin(angle).toFloat() * radius),
+                if (major) 2.dp.toPx() else 1.dp.toPx())
+        }
+        val labels = if (sensorReference) listOf("0\u00b0", "90\u00b0", "180\u00b0", "270\u00b0")
+        else listOf("N", "E", "S", "W")
+        paint.color = android.graphics.Color.rgb(169, 184, 208)
+        paint.textSize = 11.dp.toPx()
+        labels.forEachIndexed { index, label ->
+            val angle = Math.toRadians(index * 90.0 - 90.0)
+            val x = center.x + cos(angle).toFloat() * radius * 1.20f
+            val y = center.y + sin(angle).toFloat() * radius * 1.20f -
+                    (paint.ascent() + paint.descent()) / 2f
+            drawContext.canvas.nativeCanvas.drawText(label, x, y, paint)
+        }
+        if (bearing != null) {
+            val angle = Math.toRadians(bearing - 90.0)
+            val tip = Offset(center.x + cos(angle).toFloat() * radius * 0.79f,
+                center.y + sin(angle).toFloat() * radius * 0.79f)
+            val left = Offset(center.x + cos(angle + 2.45).toFloat() * radius * 0.33f,
+                center.y + sin(angle + 2.45).toFloat() * radius * 0.33f)
+            val right = Offset(center.x + cos(angle - 2.45).toFloat() * radius * 0.33f,
+                center.y + sin(angle - 2.45).toFloat() * radius * 0.33f)
+            val path = androidx.compose.ui.graphics.Path().apply {
+                moveTo(tip.x, tip.y)
+                lineTo(left.x, left.y)
+                lineTo(center.x, center.y)
+                lineTo(right.x, right.y)
+                close()
+            }
+            drawPath(path, accent)
+            drawCircle(Color.White, 3.dp.toPx(), center)
+        }
+    }
+}
+
+@Composable
+private fun TrisonicaEnvironmentPanel(packet: TelemetryPacket, wide: Boolean) {
+    val celsius = trisonicaFinite(packet.temperatureC)
+    DashboardPanel(modifier = Modifier.fillMaxWidth(), contentPadding = 14.dp) {
+        Text("ENVIRONMENT", color = TextSoft, fontWeight = FontWeight.Bold,
+            style = MaterialTheme.typography.labelLarge)
+        Spacer(Modifier.height(10.dp))
+        if (wide) {
+            Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(18.dp)) {
+                TrisonicaEnvironmentMetric("TEMPERATURE", trisonicaNumber(celsius, 2), "\u00b0C",
+                    "${trisonicaNumber(celsius?.let { cToF(it) }, 2)} \u00b0F", Orange, Modifier.weight(1f))
+                TrisonicaEnvironmentMetric("HUMIDITY", trisonicaNumber(packet.humidityPercent, 2), "%",
+                    "Reported humidity", Blue, Modifier.weight(1f))
+                TrisonicaEnvironmentMetric("PRESSURE", trisonicaNumber(packet.pressureHpa, 2), "hPa",
+                    "Reported atmospheric pressure", Cyan, Modifier.weight(1f))
+            }
+        } else {
+            Column(verticalArrangement = Arrangement.spacedBy(14.dp)) {
+                TrisonicaEnvironmentMetric("TEMPERATURE", trisonicaNumber(celsius, 2), "\u00b0C",
+                    "${trisonicaNumber(celsius?.let { cToF(it) }, 2)} \u00b0F", Orange, Modifier.fillMaxWidth())
+                TrisonicaEnvironmentMetric("HUMIDITY", trisonicaNumber(packet.humidityPercent, 2), "%",
+                    "Reported humidity", Blue, Modifier.fillMaxWidth())
+                TrisonicaEnvironmentMetric("PRESSURE", trisonicaNumber(packet.pressureHpa, 2), "hPa",
+                    "Reported atmospheric pressure", Cyan, Modifier.fillMaxWidth())
+            }
+        }
+    }
+}
+
+@Composable
+private fun TrisonicaEnvironmentMetric(
+    label: String, value: String, unit: String, secondary: String, accent: Color, modifier: Modifier
+) {
+    Column(modifier, verticalArrangement = Arrangement.spacedBy(4.dp)) {
+        Text(label, color = TextSoft, fontWeight = FontWeight.Bold,
+            style = MaterialTheme.typography.labelMedium)
+        Row(verticalAlignment = Alignment.Bottom) {
+            Text(value, color = accent, fontWeight = FontWeight.Bold,
+                style = MaterialTheme.typography.headlineSmall)
+            Text(" $unit", color = TextSoft, modifier = Modifier.padding(bottom = 3.dp))
+        }
+        Text(secondary, color = TextMuted, style = MaterialTheme.typography.bodySmall)
+    }
+}
+
+@Composable
+private fun TrisonicaRawWindPanel(packet: TelemetryPacket, modifier: Modifier) {
+    val horizontal = trisonicaNonNegative(packet.windSpeed2dMps)
+        ?: trisonicaHorizontal(packet.windUMps, packet.windVMps)
+    val calm = horizontal != null && horizontal < TRISONICA_CALM_MPS
+    val reportedBearing = trisonicaBearing(packet.windDirectionDeg)
+    val sensorOk = packet.windStatus.equals("ok", ignoreCase = true)
+    val pointer = reportedBearing.takeIf { !calm && sensorOk }
+    DashboardPanel(modifier = modifier, contentPadding = 14.dp) {
+        Text("RAW WIND DIRECTION", color = Color.White, fontWeight = FontWeight.Bold,
+            style = MaterialTheme.typography.titleMedium)
+        Text("Sensor reference / no orientation or motion correction", color = TextSoft,
+            style = MaterialTheme.typography.bodySmall)
+        Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+            Box(Modifier.weight(1f).height(190.dp), contentAlignment = Alignment.Center) {
+                TrisonicaBearingGauge(pointer, true, Cyan, Modifier.fillMaxSize())
+                if (pointer == null) Text(
+                    when { !sensorOk -> "NOT READY"; calm -> "CALM"; else -> "NO DIRECTION" },
+                    color = TextMuted, style = MaterialTheme.typography.labelMedium)
+            }
+            Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                Text(trisonicaAngle(reportedBearing), color = Cyan,
+                    style = MaterialTheme.typography.headlineSmall, fontWeight = FontWeight.Bold)
+                Text("Reported bearing", color = TextSoft, style = MaterialTheme.typography.bodySmall)
+                Text("2D: ${trisonicaNumber(horizontal)} m/s", color = Color.White)
+                Text("Total: ${trisonicaNumber(packet.windSpeedMps)} m/s", color = Color.White)
+                Text("W: ${trisonicaNumber(packet.windWMps)} m/s", color = TextSoft)
+            }
+        }
+        Text("0\u00b0 is the sensor's reference, not automatically geographic north.",
+            color = Yellow, style = MaterialTheme.typography.bodySmall)
+        Text("Pointer marks the reported bearing. No direction is inferred from raw U/V axes.",
+            color = TextMuted, style = MaterialTheme.typography.bodySmall)
+        if (calm) Text("Below 0.2 m/s horizontal speed: direction pointer suppressed.",
+            color = TextMuted, style = MaterialTheme.typography.bodySmall)
+    }
+}
+
+@Composable
+private fun TrisonicaCorrectedWindPanel(wind: TrisonicaCorrectedWind, modifier: Modifier) {
+    val accent = if (wind.isAmbient) Green else if (wind.available) Yellow else TextMuted
+    val calm = wind.horizontalMps?.let { it < TRISONICA_CALM_MPS } == true
+    DashboardPanel(modifier = modifier, contentPadding = 14.dp) {
+        Text("CORRECTED WIND DIRECTION", color = Color.White, fontWeight = FontWeight.Bold,
+            style = MaterialTheme.typography.titleMedium)
+        Text(wind.reference, color = TextSoft, style = MaterialTheme.typography.bodySmall)
+        Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+            Box(Modifier.weight(1f).height(190.dp), contentAlignment = Alignment.Center) {
+                TrisonicaBearingGauge(wind.directionFromDeg, false, accent, Modifier.fillMaxSize())
+                if (wind.directionFromDeg == null) Text(
+                    if (calm) "CALM" else "NO DIRECTION", color = TextMuted,
+                    style = MaterialTheme.typography.labelMedium)
+            }
+            Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                Text(trisonicaAngle(wind.directionFromDeg), color = accent,
+                    style = MaterialTheme.typography.headlineSmall, fontWeight = FontWeight.Bold)
+                Text("FROM ${trisonicaCompassPoint(wind.directionFromDeg)}", color = accent,
+                    style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Bold)
+                Text("2D: ${trisonicaNumber(wind.horizontalMps)} m/s", color = Color.White)
+                Text("Up: ${trisonicaNumber(wind.upMps)} m/s", color = TextSoft)
+            }
+        }
+        Text(wind.title, color = accent, fontWeight = FontWeight.Bold,
+            style = MaterialTheme.typography.labelLarge)
+        Text(wind.note, color = if (wind.isAmbient) TextSoft else Yellow,
+            style = MaterialTheme.typography.bodySmall)
+        Text("Pointer identifies the wind source. Compass north follows the frame label above.",
+            color = TextMuted, style = MaterialTheme.typography.bodySmall)
+    }
+}
+
+@Composable
+private fun TrisonicaVectorPanel(
+    title: String,
+    subtitle: String,
+    values: List<Pair<String, Double?>>,
+    accent: Color,
+    modifier: Modifier
+) {
+    val finiteValues = values.mapNotNull { trisonicaFinite(it.second) }
+    val scale = (finiteValues.maxOfOrNull { kotlin.math.abs(it) } ?: 1.0).coerceAtLeast(1.0)
+    DashboardPanel(modifier = modifier, contentPadding = 12.dp) {
+        Text(title, color = accent, fontWeight = FontWeight.Bold,
+            style = MaterialTheme.typography.labelLarge)
+        Text(subtitle, color = TextSoft, style = MaterialTheme.typography.bodySmall)
+        Spacer(Modifier.height(8.dp))
+        values.forEach { (label, rawValue) ->
+            val value = trisonicaFinite(rawValue)
+            Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
+                Text(label, color = TextSoft, style = MaterialTheme.typography.bodySmall)
+                Text("${trisonicaNumber(value, 3)} m/s", color = Color.White,
+                    style = MaterialTheme.typography.bodySmall)
+            }
+            Canvas(Modifier.fillMaxWidth().height(14.dp)) {
+                val midX = size.width / 2f
+                val y = size.height / 2f
+                drawLine(PanelBorder, Offset(0f, y), Offset(size.width, y), 3.dp.toPx(), StrokeCap.Round)
+                drawLine(TextMuted, Offset(midX, 0f), Offset(midX, size.height), 1.dp.toPx())
+                if (value != null) {
+                    val endX = midX + (value / scale).coerceIn(-1.0, 1.0).toFloat() * (midX - 3.dp.toPx())
+                    drawLine(accent, Offset(midX, y), Offset(endX, y), 4.dp.toPx(), StrokeCap.Round)
+                }
+            }
+            Spacer(Modifier.height(4.dp))
+        }
+        Text("Signed bars; per-card scale +/-${trisonicaNumber(scale, 1)} m/s",
+            color = TextMuted, style = MaterialTheme.typography.bodySmall)
+    }
+}
+
+@Composable
+private fun TrisonicaProcessingPanel(packet: TelemetryPacket, wind: TrisonicaCorrectedWind) {
+    DashboardPanel(modifier = Modifier.fillMaxWidth(), contentPadding = 14.dp) {
+        Text("WIND PROCESSING DIAGNOSTICS", color = Color.White, fontWeight = FontWeight.Bold,
+            style = MaterialTheme.typography.titleMedium)
+        Text("Exact received fields are shown here, even when a correction is not usable.",
+            color = TextSoft, style = MaterialTheme.typography.bodySmall)
+        Spacer(Modifier.height(8.dp))
+        TrisonicaDetailRow("Processed status", packet.windProcessedStatus)
+        TrisonicaDetailRow("Coordinate frame", packet.windProcessedFrame)
+        TrisonicaDetailRow("ORIENTUV", packet.windProcessedOrientuv)
+        TrisonicaDetailRow("Heading used by processor", trisonicaAngle(packet.windProcessedHeadingDeg))
+        TrisonicaDetailRow("Tilt correction applied", when (packet.windProcessedTiltApplied) {
+            true -> "Yes"; false -> "No"; null -> "Not supplied"
+        })
+        TrisonicaDetailRow("Motion compensation", packet.windMotionCompensation)
+        TrisonicaDetailRow("GPS correction reason", packet.windGpsReason)
+        TrisonicaDetailRow("Active corrected display", wind.title)
+        TrisonicaDetailRow("Raw 2D speed (received)", "${trisonicaNumber(packet.windSpeed2dMps, 3)} m/s")
+        TrisonicaDetailRow("Raw total speed (received)", "${trisonicaNumber(packet.windSpeedMps, 3)} m/s")
+        TrisonicaDetailRow("Raw vector magnitude (derived)",
+            "${trisonicaNumber(trisonicaMagnitude(packet.windUMps, packet.windVMps, packet.windWMps), 3)} m/s")
+        TrisonicaDetailRow("Ambient 2D speed (received)",
+            "${trisonicaNumber(packet.windAmbientSpeed2dMps, 3)} m/s")
+        TrisonicaDetailRow("Ambient FROM direction (received)",
+            trisonicaAngle(packet.windAmbientDirectionFromDeg))
+        Text("ENU = East, North, Up. A received ambient field alone does not establish valid motion correction.",
+            color = Yellow, style = MaterialTheme.typography.bodySmall,
+            modifier = Modifier.padding(top = 8.dp))
+    }
+}
+
+@Composable
+private fun TrisonicaGpsContextPanel(packet: TelemetryPacket) {
+    DashboardPanel(modifier = Modifier.fillMaxWidth(), contentPadding = 14.dp) {
+        Text("GPS CONTEXT FOR WIND CORRECTION", color = Color.White,
+            fontWeight = FontWeight.Bold, style = MaterialTheme.typography.titleMedium)
+        Spacer(Modifier.height(8.dp))
+        TrisonicaDetailRow("GPS status", packet.gpsStatus)
+        TrisonicaDetailRow("Satellites / HDOP",
+            "${packet.gpsSatellites?.toString() ?: "--"} / ${trisonicaNumber(packet.gpsHdop)}")
+        TrisonicaDetailRow("Ground speed", "${trisonicaNumber(packet.gpsSpeedKnots)} kt")
+        TrisonicaDetailRow("Course over ground", trisonicaAngle(packet.gpsCourseDeg))
+        TrisonicaDetailRow("GPS timestamp (UTC)", packet.gpsTimestampUtc)
+        Text("GPS course is direction of travel, not magnetic sensor heading. The app displays the correction sent by the station; it does not reapply it.",
+            color = TextSoft, style = MaterialTheme.typography.bodySmall,
+            modifier = Modifier.padding(top = 8.dp))
+    }
+}
+
+@Composable
+private fun TrisonicaDetailRow(label: String, value: String) {
+    Row(
+        modifier = Modifier.fillMaxWidth().padding(vertical = 3.dp),
+        horizontalArrangement = Arrangement.spacedBy(16.dp),
+        verticalAlignment = Alignment.Top
+    ) {
+        Text(label, modifier = Modifier.weight(0.42f), color = TextSoft,
+            style = MaterialTheme.typography.bodySmall)
+        Text(value.ifBlank { "--" }, modifier = Modifier.weight(0.58f), color = Color.White,
+            style = MaterialTheme.typography.bodySmall, fontWeight = FontWeight.SemiBold)
+    }
+}
